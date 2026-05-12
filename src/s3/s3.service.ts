@@ -1,0 +1,119 @@
+import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import {
+  GetObjectCommand,
+  ListObjectsV2Command,
+  PutObjectCommand,
+  S3Client,
+} from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { createReadStream } from 'node:fs';
+import { VIDEO_CONFIG, VideoConfigValues } from '../config/video.config';
+
+@Injectable()
+export class S3Service {
+  private readonly client: S3Client;
+  private readonly bucket: string;
+  private readonly videoCfg: VideoConfigValues;
+
+  constructor(private readonly config: ConfigService) {
+    const region = this.config.getOrThrow<string>('AWS_REGION');
+    const endpoint = this.config.get<string>('S3_ENDPOINT');
+    this.bucket = this.config.getOrThrow<string>('S3_BUCKET');
+    this.videoCfg = this.config.getOrThrow<VideoConfigValues>(VIDEO_CONFIG);
+
+    this.client = new S3Client({
+      region,
+      ...(endpoint ? { endpoint, forcePathStyle: true } : {}),
+    });
+  }
+
+  async uploadFile(params: {
+    key: string;
+    filePath: string;
+    contentType: string;
+  }): Promise<void> {
+    await this.client.send(
+      new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: params.key,
+        Body: createReadStream(params.filePath),
+        ContentType: params.contentType,
+      }),
+    );
+  }
+
+  async putJson(key: string, value: unknown): Promise<void> {
+    await this.client.send(
+      new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+        Body: JSON.stringify(value),
+        ContentType: 'application/json; charset=utf-8',
+      }),
+    );
+  }
+
+  async getJson<T>(key: string): Promise<T | null> {
+    try {
+      const out = await this.client.send(
+        new GetObjectCommand({
+          Bucket: this.bucket,
+          Key: key,
+        }),
+      );
+      const raw = await out.Body?.transformToString();
+      if (!raw) {
+        return null;
+      }
+      return JSON.parse(raw) as T;
+    } catch (e: unknown) {
+      if (this.isNotFound(e)) {
+        return null;
+      }
+      throw e;
+    }
+  }
+
+  /** Lists object keys under prefix (paginated). */
+  async listKeysWithPrefix(prefix: string): Promise<string[]> {
+    const keys: string[] = [];
+    let continuationToken: string | undefined;
+    do {
+      const page = await this.client.send(
+        new ListObjectsV2Command({
+          Bucket: this.bucket,
+          Prefix: prefix,
+          ContinuationToken: continuationToken,
+        }),
+      );
+      for (const obj of page.Contents ?? []) {
+        if (obj.Key) {
+          keys.push(obj.Key);
+        }
+      }
+      continuationToken = page.IsTruncated
+        ? page.NextContinuationToken
+        : undefined;
+    } while (continuationToken);
+    return keys;
+  }
+
+  async presignedGetUrl(key: string): Promise<string> {
+    const cmd = new GetObjectCommand({
+      Bucket: this.bucket,
+      Key: key,
+    });
+    return getSignedUrl(this.client, cmd, {
+      expiresIn: this.videoCfg.presignedUrlExpirySeconds,
+    });
+  }
+
+  private isNotFound(e: unknown): boolean {
+    if (typeof e !== 'object' || e === null || !('name' in e)) {
+      return false;
+    }
+    const name = (e as { name: string }).name;
+    return name === 'NoSuchKey' || name === 'NotFound';
+  }
+}
