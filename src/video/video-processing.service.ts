@@ -99,7 +99,14 @@ export class VideoProcessingService {
         '-map',
         '[outv]',
         ...(hasAudio
-          ? ['-map', '0:a:0', '-c:a', 'libopus', '-b:a', '96k']
+          ? [
+              '-map',
+              '0:a:0',
+              '-c:a',
+              'libopus',
+              '-b:a',
+              `${videoCfg.opusAudioBitrateK}k`,
+            ]
           : ['-an']),
         '-c:v',
         'libvpx-vp9',
@@ -110,7 +117,7 @@ export class VideoProcessingService {
         '-row-mt',
         '1',
         '-cpu-used',
-        '1',
+        String(videoCfg.vp9CpuUsed),
         processedPath,
       ];
 

@@ -16,6 +16,10 @@ export interface VideoConfigValues {
   snapshotScaleShortSec: number;
   snapshotScaleLongSec: number;
   vp9Crf: number;
+  /** libvpx-vp9 speed (0 = slowest / best compression efficiency, 5 = fastest). */
+  vp9CpuUsed: number;
+  /** Opus audio bitrate in kb/s when source has audio */
+  opusAudioBitrateK: number;
   presignedUrlExpirySeconds: number;
   allowedMimeTypes: string[];
 }
@@ -37,7 +41,18 @@ export const videoConfig = registerAs(
     snapshotScaleLongSec: Number(
       process.env.SNAPSHOT_SCALE_LONG_SEC ?? 120,
     ),
-    vp9Crf: Number(process.env.VP9_CRF ?? 32),
+    vp9Crf: Math.min(
+      50,
+      Math.max(10, Number(process.env.VP9_CRF ?? 37)),
+    ),
+    vp9CpuUsed: Math.min(
+      5,
+      Math.max(0, Math.floor(Number(process.env.VP9_CPU_USED ?? 0))),
+    ),
+    opusAudioBitrateK: Math.min(
+      256,
+      Math.max(24, Number(process.env.OPUS_AUDIO_BITRATE_K ?? 64)),
+    ),
     presignedUrlExpirySeconds: Number(
       process.env.PRESIGNED_URL_EXPIRY_SECONDS ?? 3600,
     ),
