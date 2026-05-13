@@ -63,6 +63,10 @@ export class StudioController {
       regionId?: string;
       spotId?: string;
       sessionDate?: string;
+      sessionTime?: string;
+      durationMinutes?: number | string;
+      conditionsRating?: number | string | null;
+      waveTypes?: unknown;
     },
   ) {
     return this.studio.createSession(userId, body);

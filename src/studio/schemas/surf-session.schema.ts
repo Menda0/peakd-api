@@ -24,6 +24,22 @@ export class SurfSession {
   @Prop({ required: true })
   sessionDate: string;
 
+  /** Local wall time HH:mm (24h) */
+  @Prop({ type: String, default: '12:00' })
+  sessionTime: string;
+
+  /** Surf block length in minutes */
+  @Prop({ type: Number, default: 120 })
+  durationMinutes: number;
+
+  /** 1–5 conditions rating; null if not set (legacy) */
+  @Prop({ type: Number, default: null })
+  conditionsRating: number | null;
+
+  /** Wave character tags, e.g. mushy, clean */
+  @Prop({ type: [String], default: [] })
+  waveTypes: string[];
+
   @Prop({ required: true })
   createdAt: string;
 }
