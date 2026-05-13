@@ -99,14 +99,34 @@ export class S3Service {
     return keys;
   }
 
-  async presignedGetUrl(key: string): Promise<string> {
+  async presignedGetUrl(
+    key: string,
+    expiresInSeconds?: number,
+  ): Promise<string> {
     const cmd = new GetObjectCommand({
       Bucket: this.bucket,
       Key: key,
     });
+    const expiresIn =
+      expiresInSeconds ?? this.videoCfg.presignedUrlExpirySeconds;
     return getSignedUrl(this.client, cmd, {
-      expiresIn: this.videoCfg.presignedUrlExpirySeconds,
+      expiresIn,
     });
+  }
+
+  /** Presigned PUT for browser uploads (e.g. partner avatars). */
+  async presignedPutUrl(params: {
+    key: string;
+    contentType: string;
+    expiresInSeconds?: number;
+  }): Promise<string> {
+    const expiresIn = params.expiresInSeconds ?? 300;
+    const cmd = new PutObjectCommand({
+      Bucket: this.bucket,
+      Key: params.key,
+      ContentType: params.contentType,
+    });
+    return getSignedUrl(this.client, cmd, { expiresIn });
   }
 
   private isNotFound(e: unknown): boolean {
