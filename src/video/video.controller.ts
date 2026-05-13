@@ -4,11 +4,13 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Query,
+  Req,
   UploadedFile,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
-import type { Express } from 'express';
+import type { Express, Request } from 'express';
 import { Auth0JwtGuard } from '../auth/auth0-jwt.guard';
 import { AuthUserId } from '../auth/auth-user.decorator';
 import { VideoFileInterceptor } from './video-file.interceptor';
@@ -24,8 +26,11 @@ export class VideoController {
   ) {}
 
   @Get()
-  listJobs(@AuthUserId() userId: string) {
-    return this.videoRegistry.listJobs(userId);
+  listJobs(
+    @AuthUserId() userId: string,
+    @Query('surfSessionId') surfSessionId?: string,
+  ) {
+    return this.videoRegistry.listJobs(userId, surfSessionId);
   }
 
   @Get(':jobId')
@@ -41,7 +46,13 @@ export class VideoController {
   async process(
     @AuthUserId() userId: string,
     @UploadedFile() file: Express.Multer.File,
+    @Req() req: Request,
   ) {
-    return this.videoProcessing.processUploadedFile(file, userId);
+    const raw =
+      typeof req.body?.surfSessionId === 'string'
+        ? req.body.surfSessionId.trim()
+        : '';
+    const surfSessionId = raw === '' ? null : raw;
+    return this.videoProcessing.processUploadedFile(file, userId, surfSessionId);
   }
 }

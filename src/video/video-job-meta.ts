@@ -6,4 +6,5 @@ export interface VideoJobMeta {
   originalFilename: string;
   processedKey: string;
   snapshotKeys: string[];
+  surfSessionId?: string | null;
 }

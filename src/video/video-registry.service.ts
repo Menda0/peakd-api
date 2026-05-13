@@ -1,6 +1,7 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
+import { validate as uuidValidate, version as uuidVersion } from 'uuid';
 import { S3Service } from '../s3/s3.service';
 import { VideoJob } from './schemas/video-job.schema';
 
@@ -9,6 +10,7 @@ export interface VideoJobListItemDto {
   originalFilename: string;
   createdAt: string;
   thumbnailUrl?: string;
+  surfSessionId?: string | null;
 }
 
 export interface VideoJobDetailDto {
@@ -18,6 +20,7 @@ export interface VideoJobDetailDto {
   processedKey: string;
   videoUrl: string;
   snapshots: Array<{ key: string; url: string }>;
+  surfSessionId?: string | null;
 }
 
 @Injectable()
@@ -28,9 +31,23 @@ export class VideoRegistryService {
     private readonly videoJobModel: Model<VideoJob>,
   ) {}
 
-  async listJobs(userId: string): Promise<VideoJobListItemDto[]> {
+  async listJobs(
+    userId: string,
+    surfSessionId?: string,
+  ): Promise<VideoJobListItemDto[]> {
+    const filter: { userId: string; surfSessionId?: string | null } = {
+      userId,
+    };
+    if (typeof surfSessionId === 'string' && surfSessionId.trim()) {
+      const sid = surfSessionId.trim();
+      if (!uuidValidate(sid) || uuidVersion(sid) !== 4) {
+        throw new BadRequestException('Invalid surfSessionId');
+      }
+      filter.surfSessionId = sid;
+    }
+
     const docs = await this.videoJobModel
-      .find({ userId })
+      .find(filter)
       .sort({ createdAt: -1 })
       .lean()
       .exec();
@@ -48,6 +65,7 @@ export class VideoRegistryService {
         originalFilename: doc.originalFilename ?? 'video',
         createdAt: doc.createdAt,
         thumbnailUrl,
+        surfSessionId: doc.surfSessionId ?? null,
       });
     }
 
@@ -79,6 +97,7 @@ export class VideoRegistryService {
       processedKey: doc.processedKey,
       videoUrl,
       snapshots,
+      surfSessionId: doc.surfSessionId ?? null,
     };
   }
 }

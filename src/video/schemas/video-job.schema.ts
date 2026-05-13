@@ -23,7 +23,12 @@ export class VideoJob {
   /** ISO 8601 string, aligned with S3 meta.json */
   @Prop({ required: true })
   createdAt: string;
+
+  /** Surf session folder (UUID); null for legacy uploads */
+  @Prop({ type: String, default: null, index: true })
+  surfSessionId: string | null;
 }
 
 export const VideoJobSchema = SchemaFactory.createForClass(VideoJob);
 VideoJobSchema.index({ userId: 1, createdAt: -1 });
+VideoJobSchema.index({ userId: 1, surfSessionId: 1, createdAt: -1 });

@@ -7,10 +7,12 @@ import { VideoFileInterceptor } from './video-file.interceptor';
 import { S3Module } from '../s3/s3.module';
 import { VideoJob, VideoJobSchema } from './schemas/video-job.schema';
 import { Auth0JwtGuard } from '../auth/auth0-jwt.guard';
+import { StudioModule } from '../studio/studio.module';
 
 @Module({
   imports: [
     S3Module,
+    StudioModule,
     MongooseModule.forFeature([{ name: VideoJob.name, schema: VideoJobSchema }]),
   ],
   controllers: [VideoController],

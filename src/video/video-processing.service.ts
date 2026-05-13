@@ -8,7 +8,7 @@ import { ConfigService } from '@nestjs/config';
 import { join } from 'node:path';
 import { rm } from 'node:fs/promises';
 import { access } from 'node:fs/promises';
-import { v4 as uuidv4 } from 'uuid';
+import { v4 as uuidv4, validate as uuidValidate, version as uuidVersion } from 'uuid';
 import type { Express } from 'express';
 import { Model } from 'mongoose';
 import { VIDEO_CONFIG, VideoConfigValues } from '../config/video.config';
@@ -17,6 +17,7 @@ import { planSnapshotTimes } from './snapshot-planner';
 import { S3Service } from '../s3/s3.service';
 import type { VideoJobMeta } from './video-job-meta';
 import { VideoJob } from './schemas/video-job.schema';
+import { StudioService } from '../studio/studio.service';
 
 export interface ProcessVideoResult {
   jobId: string;
@@ -30,6 +31,7 @@ export class VideoProcessingService {
   constructor(
     private readonly config: ConfigService,
     private readonly s3: S3Service,
+    private readonly studio: StudioService,
     @InjectModel(VideoJob.name)
     private readonly videoJobModel: Model<VideoJob>,
   ) {}
@@ -37,7 +39,15 @@ export class VideoProcessingService {
   async processUploadedFile(
     file: Express.Multer.File,
     userId: string,
+    surfSessionId: string | null = null,
   ): Promise<ProcessVideoResult> {
+    if (surfSessionId) {
+      if (!uuidValidate(surfSessionId) || uuidVersion(surfSessionId) !== 4) {
+        throw new BadRequestException('Invalid surfSessionId');
+      }
+      await this.studio.assertSessionOwnedByUser(userId, surfSessionId);
+    }
+
     const videoCfg = this.config.getOrThrow<VideoConfigValues>(VIDEO_CONFIG);
     const watermarkPath = videoCfg.watermarkImagePath;
 
@@ -198,6 +208,7 @@ export class VideoProcessingService {
         originalFilename: file.originalname ?? 'video',
         processedKey,
         snapshotKeys,
+        surfSessionId: surfSessionId ?? null,
       };
       await this.s3.putJson(`${prefix}/meta.json`, meta);
 
@@ -208,6 +219,7 @@ export class VideoProcessingService {
         processedKey,
         snapshotKeys,
         createdAt,
+        surfSessionId: surfSessionId ?? null,
       });
 
       return {
