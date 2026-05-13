@@ -43,6 +43,21 @@ export class S3Service {
     );
   }
 
+  async putObjectBytes(params: {
+    key: string;
+    body: Buffer;
+    contentType: string;
+  }): Promise<void> {
+    await this.client.send(
+      new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: params.key,
+        Body: params.body,
+        ContentType: params.contentType,
+      }),
+    );
+  }
+
   async putJson(key: string, value: unknown): Promise<void> {
     await this.client.send(
       new PutObjectCommand({

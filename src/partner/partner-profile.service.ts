@@ -6,6 +6,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import { randomUUID } from 'node:crypto';
+import type { Express } from 'express';
 import { Model } from 'mongoose';
 import { S3Service } from '../s3/s3.service';
 import { PartnerProfile } from './schemas/partner-profile.schema';
@@ -197,7 +198,7 @@ export class PartnerProfileService {
       return this.getMe(userId);
     }
 
-    const setOnInsert = {
+    const defaultsOnInsert: Record<string, unknown> = {
       userId,
       partnerName: null,
       partnerType: 'videographer',
@@ -205,12 +206,15 @@ export class PartnerProfileService {
       avatarKey: null,
       countryCode: null,
     };
+    const setOnInsert = Object.fromEntries(
+      Object.entries(defaultsOnInsert).filter(([key]) => !(key in patch)),
+    );
 
     const updated = await this.partnerModel
       .findOneAndUpdate(
         { userId },
         { $set: patch, $setOnInsert: setOnInsert },
-        { new: true, upsert: true },
+        { upsert: true, returnDocument: 'after' },
       )
       .lean()
       .exec();
@@ -255,5 +259,29 @@ export class PartnerProfileService {
       avatarKey,
       avatarUrl,
     };
+  }
+
+  /** Multipart upload: stores object in S3 and persists `avatarKey` (avoids browser CORS to S3). */
+  async uploadAvatarMultipart(
+    userId: string,
+    file: Express.Multer.File,
+  ): Promise<PartnerProfileResponseDto> {
+    const ct = file.mimetype.trim().toLowerCase();
+    if (!AVATAR_MIME_TO_EXT[ct]) {
+      throw new BadRequestException(
+        'Avatar must be image/jpeg, image/png, image/webp, or image/gif',
+      );
+    }
+    if (!file.buffer?.length) {
+      throw new BadRequestException('Empty file');
+    }
+    const ext = AVATAR_MIME_TO_EXT[ct];
+    const avatarKey = `${this.avatarKeyPrefix(userId)}${randomUUID()}.${ext}`;
+    await this.s3.putObjectBytes({
+      key: avatarKey,
+      body: file.buffer,
+      contentType: ct,
+    });
+    return this.patchMe(userId, { avatarKey });
   }
 }

@@ -5,10 +5,14 @@ import {
   Get,
   Patch,
   Post,
+  UploadedFile,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
+import type { Express } from 'express';
 import { Auth0JwtGuard } from '../auth/auth0-jwt.guard';
 import { AuthUserId } from '../auth/auth-user.decorator';
+import { PartnerAvatarInterceptor } from './partner-avatar.interceptor';
 import {
   PartnerProfilePatchBody,
   PartnerProfileService,
@@ -46,5 +50,14 @@ export class PartnersController {
       body.contentType,
       typeof body.filename === 'string' ? body.filename : undefined,
     );
+  }
+
+  @Post('me/avatar')
+  @UseInterceptors(PartnerAvatarInterceptor)
+  uploadAvatar(
+    @AuthUserId() userId: string,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    return this.partnerProfile.uploadAvatarMultipart(userId, file);
   }
 }

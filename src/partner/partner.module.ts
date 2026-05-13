@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { Auth0JwtGuard } from '../auth/auth0-jwt.guard';
+import { PartnerAvatarInterceptor } from './partner-avatar.interceptor';
 import { S3Module } from '../s3/s3.module';
 import {
   PartnerProfile,
@@ -17,6 +18,10 @@ import { PartnersController } from './partners.controller';
     S3Module,
   ],
   controllers: [PartnersController],
-  providers: [PartnerProfileService, Auth0JwtGuard],
+  providers: [
+    PartnerProfileService,
+    Auth0JwtGuard,
+    PartnerAvatarInterceptor,
+  ],
 })
 export class PartnerModule {}
