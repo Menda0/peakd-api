@@ -1,5 +1,6 @@
-/** Stored at `videos/{jobId}/meta.json` in S3 */
+/** Stored at `videos/{userId}/{jobId}/meta.json` in S3 */
 export interface VideoJobMeta {
+  userId: string;
   jobId: string;
   createdAt: string;
   originalFilename: string;

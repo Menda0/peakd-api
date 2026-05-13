@@ -3,17 +3,20 @@ import {
   BadRequestException,
   InternalServerErrorException,
 } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
 import { ConfigService } from '@nestjs/config';
 import { join } from 'node:path';
 import { rm } from 'node:fs/promises';
 import { access } from 'node:fs/promises';
 import { v4 as uuidv4 } from 'uuid';
 import type { Express } from 'express';
+import { Model } from 'mongoose';
 import { VIDEO_CONFIG, VideoConfigValues } from '../config/video.config';
 import { ffprobeJson, runFfmpeg } from '../ffmpeg/ffmpeg.helper';
 import { planSnapshotTimes } from './snapshot-planner';
 import { S3Service } from '../s3/s3.service';
 import type { VideoJobMeta } from './video-job-meta';
+import { VideoJob } from './schemas/video-job.schema';
 
 export interface ProcessVideoResult {
   jobId: string;
@@ -27,9 +30,14 @@ export class VideoProcessingService {
   constructor(
     private readonly config: ConfigService,
     private readonly s3: S3Service,
+    @InjectModel(VideoJob.name)
+    private readonly videoJobModel: Model<VideoJob>,
   ) {}
 
-  async processUploadedFile(file: Express.Multer.File): Promise<ProcessVideoResult> {
+  async processUploadedFile(
+    file: Express.Multer.File,
+    userId: string,
+  ): Promise<ProcessVideoResult> {
     const videoCfg = this.config.getOrThrow<VideoConfigValues>(VIDEO_CONFIG);
     const watermarkPath = videoCfg.watermarkImagePath;
 
@@ -155,7 +163,7 @@ export class VideoProcessingService {
         }
       }
 
-      const prefix = `videos/${jobId}`;
+      const prefix = `videos/${userId}/${jobId}`;
       const processedKey = `${prefix}/processed.webm`;
 
       await this.s3.uploadFile({
@@ -180,15 +188,27 @@ export class VideoProcessingService {
       }
 
       const processedUrl = await this.s3.presignedGetUrl(processedKey);
+      const createdAt = new Date().toISOString();
+      const snapshotKeys = snapshots.map((s) => s.key);
 
       const meta: VideoJobMeta = {
+        userId,
         jobId,
-        createdAt: new Date().toISOString(),
+        createdAt,
         originalFilename: file.originalname ?? 'video',
         processedKey,
-        snapshotKeys: snapshots.map((s) => s.key),
+        snapshotKeys,
       };
       await this.s3.putJson(`${prefix}/meta.json`, meta);
+
+      await this.videoJobModel.create({
+        userId,
+        jobId,
+        originalFilename: meta.originalFilename,
+        processedKey,
+        snapshotKeys,
+        createdAt,
+      });
 
       return {
         jobId,

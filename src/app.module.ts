@@ -1,14 +1,23 @@
 import { Module } from '@nestjs/common';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { MongooseModule } from '@nestjs/mongoose';
 import { VideoModule } from './video/video.module';
 import { S3Module } from './s3/s3.module';
 import { videoConfig } from './config/video.config';
+import { auth0Config } from './config/auth0.config';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      load: [videoConfig],
+      load: [videoConfig, auth0Config],
+    }),
+    MongooseModule.forRootAsync({
+      imports: [ConfigModule],
+      useFactory: (config: ConfigService) => ({
+        uri: config.getOrThrow<string>('MONGODB_URI'),
+      }),
+      inject: [ConfigService],
     }),
     S3Module,
     VideoModule,

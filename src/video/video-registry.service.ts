@@ -1,6 +1,8 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
 import { S3Service } from '../s3/s3.service';
-import type { VideoJobMeta } from './video-job-meta';
+import { VideoJob } from './schemas/video-job.schema';
 
 export interface VideoJobListItemDto {
   jobId: string;
@@ -20,50 +22,50 @@ export interface VideoJobDetailDto {
 
 @Injectable()
 export class VideoRegistryService {
-  constructor(private readonly s3: S3Service) {}
+  constructor(
+    private readonly s3: S3Service,
+    @InjectModel(VideoJob.name)
+    private readonly videoJobModel: Model<VideoJob>,
+  ) {}
 
-  async listJobs(): Promise<VideoJobListItemDto[]> {
-    const keys = await this.s3.listKeysWithPrefix('videos/');
-    const metaKeys = keys.filter((k) => k.endsWith('/meta.json'));
+  async listJobs(userId: string): Promise<VideoJobListItemDto[]> {
+    const docs = await this.videoJobModel
+      .find({ userId })
+      .sort({ createdAt: -1 })
+      .lean()
+      .exec();
 
     const items: VideoJobListItemDto[] = [];
 
-    for (const key of metaKeys) {
-      const meta = await this.s3.getJson<VideoJobMeta>(key);
-      if (!meta?.jobId || !meta.createdAt) {
-        continue;
-      }
-      const firstSnap = meta.snapshotKeys?.[0];
+    for (const doc of docs) {
+      const firstSnap = doc.snapshotKeys?.[0];
       let thumbnailUrl: string | undefined;
       if (firstSnap) {
         thumbnailUrl = await this.s3.presignedGetUrl(firstSnap);
       }
       items.push({
-        jobId: meta.jobId,
-        originalFilename: meta.originalFilename ?? 'video',
-        createdAt: meta.createdAt,
+        jobId: doc.jobId,
+        originalFilename: doc.originalFilename ?? 'video',
+        createdAt: doc.createdAt,
         thumbnailUrl,
       });
     }
 
-    items.sort(
-      (a, b) =>
-        new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-    );
-
     return items;
   }
 
-  async getJob(jobId: string): Promise<VideoJobDetailDto> {
-    const key = `videos/${jobId}/meta.json`;
-    const meta = await this.s3.getJson<VideoJobMeta>(key);
-    if (!meta?.jobId) {
+  async getJob(userId: string, jobId: string): Promise<VideoJobDetailDto> {
+    const doc = await this.videoJobModel
+      .findOne({ jobId, userId })
+      .lean()
+      .exec();
+    if (!doc) {
       throw new NotFoundException(`Video job not found: ${jobId}`);
     }
 
-    const videoUrl = await this.s3.presignedGetUrl(meta.processedKey);
+    const videoUrl = await this.s3.presignedGetUrl(doc.processedKey);
     const snapshots: VideoJobDetailDto['snapshots'] = [];
-    for (const snapKey of meta.snapshotKeys ?? []) {
+    for (const snapKey of doc.snapshotKeys ?? []) {
       snapshots.push({
         key: snapKey,
         url: await this.s3.presignedGetUrl(snapKey),
@@ -71,10 +73,10 @@ export class VideoRegistryService {
     }
 
     return {
-      jobId: meta.jobId,
-      originalFilename: meta.originalFilename ?? 'video',
-      createdAt: meta.createdAt,
-      processedKey: meta.processedKey,
+      jobId: doc.jobId,
+      originalFilename: doc.originalFilename ?? 'video',
+      createdAt: doc.createdAt,
+      processedKey: doc.processedKey,
       videoUrl,
       snapshots,
     };
