@@ -338,7 +338,7 @@ export class StudioService {
       const firstSnap = job.snapshotKeys?.[0];
       if (status === 'completed' && firstSnap) {
         const list = thumbJobsBySession.get(sid) ?? [];
-        if (list.length < 3) {
+        if (list.length < 4) {
           list.push({ snapshotKey: firstSnap });
           thumbJobsBySession.set(sid, list);
         }

@@ -6,13 +6,18 @@ import { S3Service } from '../s3/s3.service';
 import { VideoJob } from './schemas/video-job.schema';
 import type { VideoJobStatus } from './schemas/video-job.schema';
 
+const LIST_THUMBNAIL_MAX = 4;
+
 export interface VideoJobListItemDto {
   jobId: string;
   originalFilename: string;
   createdAt: string;
   status: VideoJobStatus;
   errorMessage?: string | null;
+  /** First snapshot presigned URL (legacy). */
   thumbnailUrl?: string;
+  /** Up to four snapshot presigned URLs for list/detail previews. */
+  thumbnailUrls: string[];
   surfSessionId?: string | null;
 }
 
@@ -74,11 +79,13 @@ export class VideoRegistryService {
 
     for (const doc of docs) {
       const status = normalizeJobStatus(doc);
-      const firstSnap =
-        status === 'completed' ? doc.snapshotKeys?.[0] : undefined;
-      let thumbnailUrl: string | undefined;
-      if (firstSnap) {
-        thumbnailUrl = await this.s3.presignedGetUrl(firstSnap);
+      const snapKeys =
+        status === 'completed'
+          ? (doc.snapshotKeys ?? []).slice(0, LIST_THUMBNAIL_MAX)
+          : [];
+      const thumbnailUrls: string[] = [];
+      for (const key of snapKeys) {
+        thumbnailUrls.push(await this.s3.presignedGetUrl(key));
       }
       items.push({
         jobId: doc.jobId,
@@ -86,7 +93,8 @@ export class VideoRegistryService {
         createdAt: doc.createdAt,
         status,
         errorMessage: doc.errorMessage ?? null,
-        thumbnailUrl,
+        thumbnailUrl: thumbnailUrls[0],
+        thumbnailUrls,
         surfSessionId: doc.surfSessionId ?? null,
       });
     }
