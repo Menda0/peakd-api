@@ -36,6 +36,13 @@ export type SpotListItemDto = {
   verified: boolean;
 };
 
+export type SurfSessionStatus = 'open' | 'closed';
+export type SurfSessionExportStatus =
+  | 'idle'
+  | 'processing'
+  | 'ready'
+  | 'failed';
+
 export type SurfSessionListItemDto = {
   sessionId: string;
   countryCode: string;
@@ -47,6 +54,10 @@ export type SurfSessionListItemDto = {
   conditionsRating: number | null;
   waveTypes: string[];
   createdAt: string;
+  status: SurfSessionStatus;
+  closedAt: string | null;
+  exportStatus: SurfSessionExportStatus;
+  exportErrorMessage: string | null;
   spotName?: string;
   regionName?: string;
   videoCount: number;
@@ -137,6 +148,10 @@ export class StudioService {
     conditionsRating?: number | null;
     waveTypes?: string[];
     createdAt: string;
+    status?: string;
+    closedAt?: string | null;
+    exportStatus?: string;
+    exportErrorMessage?: string | null;
   }): Omit<
     SurfSessionListItemDto,
     'spotName' | 'regionName' | 'videoCount' | 'previewThumbnailUrls'
@@ -166,7 +181,29 @@ export class StudioService {
           : null,
       waveTypes: this.normalizeWaveTypes(d.waveTypes),
       createdAt: d.createdAt,
+      status: d.status === 'closed' ? 'closed' : 'open',
+      closedAt:
+        typeof d.closedAt === 'string' && d.closedAt.trim()
+          ? d.closedAt
+          : null,
+      exportStatus: this.normalizeExportStatus(d.exportStatus),
+      exportErrorMessage:
+        typeof d.exportErrorMessage === 'string' && d.exportErrorMessage.trim()
+          ? d.exportErrorMessage
+          : null,
     };
+  }
+
+  private normalizeExportStatus(raw: unknown): SurfSessionExportStatus {
+    if (
+      raw === 'processing' ||
+      raw === 'ready' ||
+      raw === 'failed' ||
+      raw === 'idle'
+    ) {
+      return raw;
+    }
+    return 'idle';
   }
 
   async listRegions(
@@ -463,6 +500,9 @@ export class StudioService {
     if (!existing) {
       throw new NotFoundException('Session not found');
     }
+    if (existing.status === 'closed') {
+      throw new BadRequestException('Cannot edit a closed session');
+    }
 
     const payload = await this.resolveSessionPayload(userId, body);
 
@@ -607,5 +647,35 @@ export class StudioService {
     if (!doc) {
       throw new ForbiddenException('Invalid or unknown surf session');
     }
+  }
+
+  async assertSessionOpenForUpload(
+    userId: string,
+    sessionId: string,
+  ): Promise<void> {
+    const doc = await this.surfSessionModel
+      .findOne({ sessionId, userId })
+      .lean()
+      .exec();
+    if (!doc) {
+      throw new ForbiddenException('Invalid or unknown surf session');
+    }
+    if (doc.status === 'closed') {
+      throw new ForbiddenException('This surf session is closed');
+    }
+  }
+
+  async getSessionForExport(
+    userId: string,
+    sessionId: string,
+  ): Promise<SurfSession> {
+    const doc = await this.surfSessionModel
+      .findOne({ sessionId, userId })
+      .lean()
+      .exec();
+    if (!doc) {
+      throw new NotFoundException('Session not found');
+    }
+    return doc as SurfSession;
   }
 }

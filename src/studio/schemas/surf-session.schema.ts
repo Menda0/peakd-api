@@ -42,6 +42,25 @@ export class SurfSession {
 
   @Prop({ required: true })
   createdAt: string;
+
+  @Prop({ type: String, enum: ['open', 'closed'], default: 'open' })
+  status: 'open' | 'closed';
+
+  @Prop({ type: String, default: null })
+  closedAt: string | null;
+
+  @Prop({
+    type: String,
+    enum: ['idle', 'processing', 'ready', 'failed'],
+    default: 'idle',
+  })
+  exportStatus: 'idle' | 'processing' | 'ready' | 'failed';
+
+  @Prop({ type: String, default: null })
+  exportZipKey: string | null;
+
+  @Prop({ type: String, default: null })
+  exportErrorMessage: string | null;
 }
 
 export const SurfSessionSchema = SchemaFactory.createForClass(SurfSession);

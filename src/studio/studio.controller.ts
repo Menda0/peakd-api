@@ -2,6 +2,8 @@ import {
   Body,
   Controller,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -11,12 +13,16 @@ import {
 } from '@nestjs/common';
 import { Auth0JwtGuard } from '../auth/auth0-jwt.guard';
 import { AuthUserId } from '../auth/auth-user.decorator';
+import { SessionExportService } from './session-export.service';
 import { StudioService } from './studio.service';
 
 @Controller('studio')
 @UseGuards(Auth0JwtGuard)
 export class StudioController {
-  constructor(private readonly studio: StudioService) {}
+  constructor(
+    private readonly studio: StudioService,
+    private readonly sessionExport: SessionExportService,
+  ) {}
 
   @Get('regions')
   listRegions(
@@ -79,6 +85,23 @@ export class StudioController {
     @Param('sessionId', new ParseUUIDPipe({ version: '4' })) sessionId: string,
   ) {
     return this.studio.getSession(userId, sessionId);
+  }
+
+  @Post('sessions/:sessionId/close')
+  @HttpCode(HttpStatus.ACCEPTED)
+  closeSession(
+    @AuthUserId() userId: string,
+    @Param('sessionId', new ParseUUIDPipe({ version: '4' })) sessionId: string,
+  ) {
+    return this.sessionExport.closeSession(userId, sessionId);
+  }
+
+  @Get('sessions/:sessionId/export/download')
+  getSessionExportDownload(
+    @AuthUserId() userId: string,
+    @Param('sessionId', new ParseUUIDPipe({ version: '4' })) sessionId: string,
+  ) {
+    return this.sessionExport.getExportDownloadUrl(userId, sessionId);
   }
 
   @Patch('sessions/:sessionId')

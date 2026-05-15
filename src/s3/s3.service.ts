@@ -8,6 +8,7 @@ import {
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createReadStream } from 'node:fs';
+import { writeFile } from 'node:fs/promises';
 import { VIDEO_CONFIG, VideoConfigValues } from '../config/video.config';
 
 @Injectable()
@@ -112,6 +113,21 @@ export class S3Service {
         : undefined;
     } while (continuationToken);
     return keys;
+  }
+
+  async downloadToFile(key: string, destPath: string): Promise<void> {
+    const out = await this.client.send(
+      new GetObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+      }),
+    );
+    const body = out.Body;
+    if (!body) {
+      throw new Error(`Empty S3 object body for key: ${key}`);
+    }
+    const bytes = await body.transformToByteArray();
+    await writeFile(destPath, bytes);
   }
 
   async presignedGetUrl(

@@ -79,6 +79,7 @@ export class VideoProcessingService {
         throw new BadRequestException('Invalid surfSessionId');
       }
       await this.studio.assertSessionOwnedByUser(userId, surfSessionId);
+      await this.studio.assertSessionOpenForUpload(userId, surfSessionId);
     }
 
     const videoCfg = this.config.getOrThrow<VideoConfigValues>(VIDEO_CONFIG);
