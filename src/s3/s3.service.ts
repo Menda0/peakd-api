@@ -15,12 +15,15 @@ import { VIDEO_CONFIG, VideoConfigValues } from '../config/video.config';
 export class S3Service {
   private readonly client: S3Client;
   private readonly bucket: string;
+  /** Original uploads + raw session ZIPs (short-lived bucket; lifecycle in AWS). */
+  private readonly rawBucket: string;
   private readonly videoCfg: VideoConfigValues;
 
   constructor(private readonly config: ConfigService) {
     const region = this.config.getOrThrow<string>('AWS_REGION');
     const endpoint = this.config.get<string>('S3_ENDPOINT');
     this.bucket = this.config.getOrThrow<string>('S3_BUCKET');
+    this.rawBucket = this.config.getOrThrow<string>('S3_RAW_BUCKET');
     this.videoCfg = this.config.getOrThrow<VideoConfigValues>(VIDEO_CONFIG);
 
     this.client = new S3Client({
@@ -34,9 +37,25 @@ export class S3Service {
     filePath: string;
     contentType: string;
   }): Promise<void> {
+    await this.putFileStream(this.bucket, params);
+  }
+
+  /** Upload to the raw retention bucket (`S3_RAW_BUCKET`). */
+  async uploadFileRaw(params: {
+    key: string;
+    filePath: string;
+    contentType: string;
+  }): Promise<void> {
+    await this.putFileStream(this.rawBucket, params);
+  }
+
+  private async putFileStream(
+    bucket: string,
+    params: { key: string; filePath: string; contentType: string },
+  ): Promise<void> {
     await this.client.send(
       new PutObjectCommand({
-        Bucket: this.bucket,
+        Bucket: bucket,
         Key: params.key,
         Body: createReadStream(params.filePath),
         ContentType: params.contentType,
@@ -116,9 +135,21 @@ export class S3Service {
   }
 
   async downloadToFile(key: string, destPath: string): Promise<void> {
+    await this.downloadToFileFromBucket(this.bucket, key, destPath);
+  }
+
+  async downloadToFileRaw(key: string, destPath: string): Promise<void> {
+    await this.downloadToFileFromBucket(this.rawBucket, key, destPath);
+  }
+
+  private async downloadToFileFromBucket(
+    bucket: string,
+    key: string,
+    destPath: string,
+  ): Promise<void> {
     const out = await this.client.send(
       new GetObjectCommand({
-        Bucket: this.bucket,
+        Bucket: bucket,
         Key: key,
       }),
     );
@@ -136,6 +167,22 @@ export class S3Service {
   ): Promise<string> {
     const cmd = new GetObjectCommand({
       Bucket: this.bucket,
+      Key: key,
+    });
+    const expiresIn =
+      expiresInSeconds ?? this.videoCfg.presignedUrlExpirySeconds;
+    return getSignedUrl(this.client, cmd, {
+      expiresIn,
+    });
+  }
+
+  /** Presigned GET for an object in the raw bucket. */
+  async presignedGetUrlRaw(
+    key: string,
+    expiresInSeconds?: number,
+  ): Promise<string> {
+    const cmd = new GetObjectCommand({
+      Bucket: this.rawBucket,
       Key: key,
     });
     const expiresIn =

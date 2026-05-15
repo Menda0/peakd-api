@@ -96,6 +96,14 @@ export class StudioController {
     return this.sessionExport.closeSession(userId, sessionId);
   }
 
+  @Get('sessions/:sessionId/export/raw/download')
+  getSessionRawExportDownload(
+    @AuthUserId() userId: string,
+    @Param('sessionId', new ParseUUIDPipe({ version: '4' })) sessionId: string,
+  ) {
+    return this.sessionExport.getRawExportDownloadUrl(userId, sessionId);
+  }
+
   @Get('sessions/:sessionId/export/download')
   getSessionExportDownload(
     @AuthUserId() userId: string,

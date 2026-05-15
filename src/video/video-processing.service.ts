@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { ConfigService } from '@nestjs/config';
-import { join } from 'node:path';
+import { join, extname } from 'node:path';
 import { rm } from 'node:fs/promises';
 import { access } from 'node:fs/promises';
 import { v4 as uuidv4, validate as uuidValidate, version as uuidVersion } from 'uuid';
@@ -47,6 +47,7 @@ type JobPipelineContext = {
   inputPath: string;
   workDir: string;
   originalFilename: string;
+  originalMime: string;
   surfSessionId: string | null;
   createdAt: string;
   watermarkPath: string;
@@ -120,6 +121,7 @@ export class VideoProcessingService {
       surfSessionId: surfSessionId ?? null,
       status: 'processing',
       snapshotKeys: [],
+      rawOriginalKey: null,
     });
 
     const ctx: JobPipelineContext = {
@@ -128,6 +130,7 @@ export class VideoProcessingService {
       inputPath,
       workDir,
       originalFilename,
+      originalMime: mime,
       surfSessionId,
       createdAt,
       watermarkPath,
@@ -155,6 +158,7 @@ export class VideoProcessingService {
       inputPath,
       workDir,
       originalFilename,
+      originalMime,
       surfSessionId,
       createdAt,
       watermarkPath,
@@ -179,6 +183,22 @@ export class VideoProcessingService {
         const msg = e instanceof Error ? e.message : String(e);
         throw new BadRequestException(`Could not read video: ${msg}`);
       }
+
+      let rawExt = extname(originalFilename).toLowerCase();
+      if (!rawExt || rawExt === '.') {
+        rawExt = '.bin';
+      }
+      const rawOriginalKey = `videos/${userId}/${jobId}/original${rawExt}`;
+      await this.s3.uploadFileRaw({
+        key: rawOriginalKey,
+        filePath: inputPath,
+        contentType: originalMime.trim()
+          ? originalMime
+          : 'application/octet-stream',
+      });
+      await this.videoJobModel
+        .updateOne({ jobId }, { $set: { rawOriginalKey } })
+        .exec();
 
       const snapshotTimes = planSnapshotTimes(durationSec, {
         interiorStartRatio: videoCfg.interiorStartRatio,

@@ -61,6 +61,23 @@ export class SurfSession {
 
   @Prop({ type: String, default: null })
   exportErrorMessage: string | null;
+
+  @Prop({
+    type: String,
+    enum: ['idle', 'processing', 'ready', 'failed'],
+    default: 'idle',
+  })
+  rawExportStatus: 'idle' | 'processing' | 'ready' | 'failed';
+
+  @Prop({ type: String, default: null })
+  rawExportZipKey: string | null;
+
+  @Prop({ type: String, default: null })
+  rawExportErrorMessage: string | null;
+
+  /** ISO instant after which raw ZIP download is refused (UI retention hint). */
+  @Prop({ type: String, default: null })
+  rawExportExpiresAt: string | null;
 }
 
 export const SurfSessionSchema = SchemaFactory.createForClass(SurfSession);

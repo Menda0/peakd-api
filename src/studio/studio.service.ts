@@ -58,6 +58,9 @@ export type SurfSessionListItemDto = {
   closedAt: string | null;
   exportStatus: SurfSessionExportStatus;
   exportErrorMessage: string | null;
+  rawExportStatus: SurfSessionExportStatus;
+  rawExportErrorMessage: string | null;
+  rawExportExpiresAt: string | null;
   spotName?: string;
   regionName?: string;
   videoCount: number;
@@ -152,6 +155,9 @@ export class StudioService {
     closedAt?: string | null;
     exportStatus?: string;
     exportErrorMessage?: string | null;
+    rawExportStatus?: string;
+    rawExportErrorMessage?: string | null;
+    rawExportExpiresAt?: string | null;
   }): Omit<
     SurfSessionListItemDto,
     'spotName' | 'regionName' | 'videoCount' | 'previewThumbnailUrls'
@@ -190,6 +196,17 @@ export class StudioService {
       exportErrorMessage:
         typeof d.exportErrorMessage === 'string' && d.exportErrorMessage.trim()
           ? d.exportErrorMessage
+          : null,
+      rawExportStatus: this.normalizeExportStatus(d.rawExportStatus),
+      rawExportErrorMessage:
+        typeof d.rawExportErrorMessage === 'string' &&
+        d.rawExportErrorMessage.trim()
+          ? d.rawExportErrorMessage
+          : null,
+      rawExportExpiresAt:
+        typeof d.rawExportExpiresAt === 'string' &&
+        d.rawExportExpiresAt.trim()
+          ? d.rawExportExpiresAt
           : null,
     };
   }

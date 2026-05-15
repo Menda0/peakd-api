@@ -1,13 +1,15 @@
 import {
   BadRequestException,
   ConflictException,
+  GoneException,
   Injectable,
   Logger,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import archiver from 'archiver';
 import { createWriteStream } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, extname, join } from 'node:path';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { Model } from 'mongoose';
@@ -20,6 +22,7 @@ export type CloseSessionResult = {
   sessionId: string;
   status: 'closed';
   exportStatus: 'processing';
+  rawExportStatus: 'processing';
 };
 
 export type SessionExportDownloadDto = {
@@ -53,6 +56,7 @@ export class SessionExportService {
     private readonly videoJobModel: Model<VideoJob>,
     private readonly s3: S3Service,
     private readonly studio: StudioService,
+    private readonly config: ConfigService,
   ) {}
 
   async closeSession(
@@ -88,16 +92,21 @@ export class SessionExportService {
             status: 'closed',
             closedAt,
             exportStatus: 'processing',
+            exportZipKey: null,
             exportErrorMessage: null,
+            rawExportStatus: 'processing',
+            rawExportZipKey: null,
+            rawExportErrorMessage: null,
+            rawExportExpiresAt: null,
           },
         },
       )
       .exec();
 
-    void this.buildExportZip(userId, sessionId).catch((err: unknown) => {
+    void this.runSessionExports(userId, sessionId).catch((err: unknown) => {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.error(
-        `Export failed for session ${sessionId}: ${msg}`,
+        `Session export failed for ${sessionId}: ${msg}`,
         err instanceof Error ? err.stack : undefined,
       );
     });
@@ -106,7 +115,35 @@ export class SessionExportService {
       sessionId,
       status: 'closed',
       exportStatus: 'processing',
+      rawExportStatus: 'processing',
     };
+  }
+
+  async getRawExportDownloadUrl(
+    userId: string,
+    sessionId: string,
+  ): Promise<SessionExportDownloadDto> {
+    const session = await this.studio.getSessionForExport(userId, sessionId);
+
+    if (session.rawExportStatus !== 'ready' || !session.rawExportZipKey) {
+      throw new ConflictException({
+        message: 'Raw export is not ready for download',
+        rawExportStatus: session.rawExportStatus ?? 'idle',
+        rawExportErrorMessage: session.rawExportErrorMessage ?? null,
+      });
+    }
+
+    const expiresAt = session.rawExportExpiresAt
+      ? Date.parse(session.rawExportExpiresAt)
+      : NaN;
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      throw new GoneException('Raw export download window has expired');
+    }
+
+    const downloadUrl = await this.s3.presignedGetUrlRaw(
+      session.rawExportZipKey,
+    );
+    return { downloadUrl };
   }
 
   async getExportDownloadUrl(
@@ -127,11 +164,143 @@ export class SessionExportService {
     });
   }
 
+  private rawRetentionDays(): number {
+    const raw = this.config.get<string>('RAW_EXPORT_RETENTION_DAYS');
+    const n =
+      raw !== undefined && raw !== '' ? parseInt(raw, 10) : 30;
+    if (!Number.isFinite(n) || n < 1) {
+      return 30;
+    }
+    return Math.min(n, 3650);
+  }
+
+  private async runSessionExports(
+    userId: string,
+    sessionId: string,
+  ): Promise<void> {
+    await Promise.all([
+      this.buildProcessedExportZip(userId, sessionId),
+      this.buildRawExportZip(userId, sessionId),
+    ]);
+  }
+
+  private rawExportZipKey(userId: string, sessionId: string): string {
+    return `sessions/${userId}/${sessionId}/raw-export.zip`;
+  }
+
+  private async buildRawExportZip(
+    userId: string,
+    sessionId: string,
+  ): Promise<void> {
+    const workDir = await mkdtemp(join(tmpdir(), 'peakd-session-raw-export-'));
+    const zipPath = join(workDir, 'raw-export.zip');
+
+    try {
+      const jobs = await this.videoJobModel
+        .find({
+          userId,
+          surfSessionId: sessionId,
+          status: 'completed',
+        })
+        .sort({ createdAt: 1 })
+        .lean()
+        .exec();
+
+      const jobsWithRaw = jobs.filter((j) => Boolean(j.rawOriginalKey));
+      if (jobsWithRaw.length === 0) {
+        await this.surfSessionModel
+          .updateOne(
+            { sessionId, userId },
+            {
+              $set: {
+                rawExportStatus: 'failed',
+                rawExportErrorMessage:
+                  'No completed videos with raw originals to include',
+              },
+            },
+          )
+          .exec();
+        return;
+      }
+
+      const usedNames = new Set<string>();
+      const stagingDir = join(workDir, 'staging');
+      const { mkdir } = await import('node:fs/promises');
+      await mkdir(stagingDir, { recursive: true });
+
+      await this.writeZip(zipPath, async (archive) => {
+        for (const job of jobsWithRaw) {
+          const rawKey = job.rawOriginalKey as string;
+          const videoName = sanitizeVideoBaseName(
+            job.originalFilename ?? 'video',
+            usedNames,
+          );
+          const rootExt = extname(rawKey).toLowerCase() || '.bin';
+          const rawLocal = join(stagingDir, `${job.jobId}-original${rootExt}`);
+          await this.s3.downloadToFileRaw(rawKey, rawLocal);
+          archive.file(rawLocal, { name: `${videoName}${rootExt}` });
+
+          const snapshotKeys = job.snapshotKeys ?? [];
+          for (const snapKey of snapshotKeys) {
+            const snapBase = basename(snapKey);
+            const snapLocal = join(stagingDir, `${job.jobId}-${snapBase}`);
+            await this.s3.downloadToFile(snapKey, snapLocal);
+            archive.file(snapLocal, {
+              name: `${videoName}/${snapBase}`,
+            });
+          }
+        }
+      });
+
+      const zipKey = this.rawExportZipKey(userId, sessionId);
+      await this.s3.uploadFileRaw({
+        key: zipKey,
+        filePath: zipPath,
+        contentType: 'application/zip',
+      });
+
+      const retentionMs = this.rawRetentionDays() * 86_400_000;
+      const rawExportExpiresAt = new Date(
+        Date.now() + retentionMs,
+      ).toISOString();
+
+      await this.surfSessionModel
+        .updateOne(
+          { sessionId, userId },
+          {
+            $set: {
+              rawExportStatus: 'ready',
+              rawExportZipKey: zipKey,
+              rawExportErrorMessage: null,
+              rawExportExpiresAt,
+            },
+          },
+        )
+        .exec();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await this.surfSessionModel
+        .updateOne(
+          { sessionId, userId },
+          {
+            $set: {
+              rawExportStatus: 'failed',
+              rawExportErrorMessage: msg,
+            },
+          },
+        )
+        .exec();
+      throw err;
+    } finally {
+      await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
   private exportZipKey(userId: string, sessionId: string): string {
     return `sessions/${userId}/${sessionId}/export.zip`;
   }
 
-  private async buildExportZip(
+  private async buildProcessedExportZip(
     userId: string,
     sessionId: string,
   ): Promise<void> {

@@ -21,6 +21,10 @@ export class VideoJob {
   @Prop({ type: String })
   processedKey?: string;
 
+  /** Original upload on raw-retention bucket (`S3_RAW_BUCKET`) */
+  @Prop({ type: String, default: null })
+  rawOriginalKey: string | null;
+
   @Prop({ type: [String], default: [] })
   snapshotKeys: string[];
 
