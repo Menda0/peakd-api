@@ -9,6 +9,7 @@ import {
   Patch,
   Post,
   Query,
+  StreamableFile,
   UseGuards,
 } from '@nestjs/common';
 import { Auth0JwtGuard } from '../auth/auth0-jwt.guard';
@@ -97,19 +98,35 @@ export class StudioController {
   }
 
   @Get('sessions/:sessionId/export/raw/download')
-  getSessionRawExportDownload(
+  async getSessionRawExportDownload(
     @AuthUserId() userId: string,
     @Param('sessionId', new ParseUUIDPipe({ version: '4' })) sessionId: string,
-  ) {
-    return this.sessionExport.getRawExportDownloadUrl(userId, sessionId);
+  ): Promise<StreamableFile> {
+    const opened = await this.sessionExport.openRawExportDownload(
+      userId,
+      sessionId,
+    );
+    return new StreamableFile(opened.stream, {
+      type: opened.contentType,
+      disposition: `attachment; filename="${opened.filename}"`,
+      ...(opened.contentLength != null ? { length: opened.contentLength } : {}),
+    });
   }
 
   @Get('sessions/:sessionId/export/download')
-  getSessionExportDownload(
+  async getSessionExportDownload(
     @AuthUserId() userId: string,
     @Param('sessionId', new ParseUUIDPipe({ version: '4' })) sessionId: string,
-  ) {
-    return this.sessionExport.getExportDownloadUrl(userId, sessionId);
+  ): Promise<StreamableFile> {
+    const opened = await this.sessionExport.openProcessedExportDownload(
+      userId,
+      sessionId,
+    );
+    return new StreamableFile(opened.stream, {
+      type: opened.contentType,
+      disposition: `attachment; filename="${opened.filename}"`,
+      ...(opened.contentLength != null ? { length: opened.contentLength } : {}),
+    });
   }
 
   @Patch('sessions/:sessionId')

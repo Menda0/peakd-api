@@ -9,6 +9,7 @@ import {
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createReadStream } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
+import type { Readable } from 'node:stream';
 import { VIDEO_CONFIG, VideoConfigValues } from '../config/video.config';
 
 @Injectable()
@@ -159,6 +160,49 @@ export class S3Service {
     }
     const bytes = await body.transformToByteArray();
     await writeFile(destPath, bytes);
+  }
+
+  /** Readable stream for GET object (caller must consume or destroy the stream). */
+  async getObjectReadStream(key: string): Promise<{
+    stream: Readable;
+    contentLength?: number;
+    contentType: string;
+  }> {
+    return this.getObjectReadStreamFromBucket(this.bucket, key);
+  }
+
+  /** Readable stream from the raw retention bucket. */
+  async getObjectReadStreamRaw(key: string): Promise<{
+    stream: Readable;
+    contentLength?: number;
+    contentType: string;
+  }> {
+    return this.getObjectReadStreamFromBucket(this.rawBucket, key);
+  }
+
+  private async getObjectReadStreamFromBucket(
+    bucket: string,
+    key: string,
+  ): Promise<{
+    stream: Readable;
+    contentLength?: number;
+    contentType: string;
+  }> {
+    const out = await this.client.send(
+      new GetObjectCommand({
+        Bucket: bucket,
+        Key: key,
+      }),
+    );
+    const body = out.Body;
+    if (body == null) {
+      throw new Error(`Empty S3 object body for key: ${key}`);
+    }
+    return {
+      stream: body as Readable,
+      contentLength: out.ContentLength,
+      contentType: out.ContentType ?? 'application/octet-stream',
+    };
   }
 
   async presignedGetUrl(

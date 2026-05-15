@@ -12,6 +12,7 @@ import { createWriteStream } from 'node:fs';
 import { basename, extname, join } from 'node:path';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import type { Readable } from 'node:stream';
 import { Model } from 'mongoose';
 import { S3Service } from '../s3/s3.service';
 import { SurfSession } from './schemas/surf-session.schema';
@@ -25,8 +26,11 @@ export type CloseSessionResult = {
   rawExportStatus: 'processing';
 };
 
-export type SessionExportDownloadDto = {
-  downloadUrl: string;
+export type OpenedSessionExportDownload = {
+  stream: Readable;
+  contentType: string;
+  contentLength?: number;
+  filename: string;
 };
 
 function sanitizeVideoBaseName(originalFilename: string, used: Set<string>): string {
@@ -119,10 +123,10 @@ export class SessionExportService {
     };
   }
 
-  async getRawExportDownloadUrl(
+  async openRawExportDownload(
     userId: string,
     sessionId: string,
-  ): Promise<SessionExportDownloadDto> {
+  ): Promise<OpenedSessionExportDownload> {
     const session = await this.studio.getSessionForExport(userId, sessionId);
 
     if (session.rawExportStatus !== 'ready' || !session.rawExportZipKey) {
@@ -140,21 +144,31 @@ export class SessionExportService {
       throw new GoneException('Raw export download window has expired');
     }
 
-    const downloadUrl = await this.s3.presignedGetUrlRaw(
-      session.rawExportZipKey,
-    );
-    return { downloadUrl };
+    const { stream, contentLength, contentType } =
+      await this.s3.getObjectReadStreamRaw(session.rawExportZipKey);
+    return {
+      stream,
+      contentType,
+      contentLength,
+      filename: 'session-raw-export.zip',
+    };
   }
 
-  async getExportDownloadUrl(
+  async openProcessedExportDownload(
     userId: string,
     sessionId: string,
-  ): Promise<SessionExportDownloadDto> {
+  ): Promise<OpenedSessionExportDownload> {
     const session = await this.studio.getSessionForExport(userId, sessionId);
 
     if (session.exportStatus === 'ready' && session.exportZipKey) {
-      const downloadUrl = await this.s3.presignedGetUrl(session.exportZipKey);
-      return { downloadUrl };
+      const { stream, contentLength, contentType } =
+        await this.s3.getObjectReadStream(session.exportZipKey);
+      return {
+        stream,
+        contentType,
+        contentLength,
+        filename: 'session-export.zip',
+      };
     }
 
     throw new ConflictException({
