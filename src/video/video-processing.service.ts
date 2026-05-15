@@ -1,7 +1,9 @@
 import {
-  Injectable,
   BadRequestException,
+  HttpException,
+  Injectable,
   InternalServerErrorException,
+  Logger,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { ConfigService } from '@nestjs/config';
@@ -19,15 +21,42 @@ import type { VideoJobMeta } from './video-job-meta';
 import { VideoJob } from './schemas/video-job.schema';
 import { StudioService } from '../studio/studio.service';
 
-export interface ProcessVideoResult {
+export interface StartVideoJobResult {
   jobId: string;
-  processedKey: string;
-  processedUrl: string;
-  snapshots: Array<{ key: string; url: string }>;
+  status: 'processing';
 }
+
+function extractErrorMessage(err: unknown): string {
+  if (err instanceof HttpException) {
+    const res = err.getResponse();
+    if (typeof res === 'string') return res;
+    if (res && typeof res === 'object' && 'message' in res) {
+      const m = (res as { message?: string | string[] }).message;
+      if (Array.isArray(m)) return m.join(', ');
+      if (typeof m === 'string') return m;
+    }
+    return err.message;
+  }
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
+
+type JobPipelineContext = {
+  jobId: string;
+  userId: string;
+  inputPath: string;
+  workDir: string;
+  originalFilename: string;
+  surfSessionId: string | null;
+  createdAt: string;
+  watermarkPath: string;
+  videoCfg: VideoConfigValues;
+};
 
 @Injectable()
 export class VideoProcessingService {
+  private readonly logger = new Logger(VideoProcessingService.name);
+
   constructor(
     private readonly config: ConfigService,
     private readonly s3: S3Service,
@@ -36,11 +65,15 @@ export class VideoProcessingService {
     private readonly videoJobModel: Model<VideoJob>,
   ) {}
 
+  /**
+   * Validates upload, persists a `processing` job, then runs transcoding in the background
+   * so the client can poll `GET /videos` after refresh.
+   */
   async processUploadedFile(
     file: Express.Multer.File,
     userId: string,
     surfSessionId: string | null = null,
-  ): Promise<ProcessVideoResult> {
+  ): Promise<StartVideoJobResult> {
     if (surfSessionId) {
       if (!uuidValidate(surfSessionId) || uuidVersion(surfSessionId) !== 4) {
         throw new BadRequestException('Invalid surfSessionId');
@@ -72,17 +105,69 @@ export class VideoProcessingService {
       );
     }
 
+    const jobId = uuidv4();
+    const createdAt = new Date().toISOString();
+    const originalFilename = file.originalname ?? 'video';
     const inputPath = file.path;
     const workDir = join(inputPath, '..');
+
+    await this.videoJobModel.create({
+      userId,
+      jobId,
+      originalFilename,
+      createdAt,
+      surfSessionId: surfSessionId ?? null,
+      status: 'processing',
+      snapshotKeys: [],
+    });
+
+    const ctx: JobPipelineContext = {
+      jobId,
+      userId,
+      inputPath,
+      workDir,
+      originalFilename,
+      surfSessionId,
+      createdAt,
+      watermarkPath,
+      videoCfg,
+    };
+
+    void this.runJobPipeline(ctx).catch((err: unknown) => {
+      const msg = extractErrorMessage(err);
+      this.logger.error(`Job ${jobId} failed: ${msg}`, err instanceof Error ? err.stack : undefined);
+      void this.videoJobModel
+        .updateOne(
+          { jobId },
+          { $set: { status: 'failed', errorMessage: msg } },
+        )
+        .exec();
+    });
+
+    return { jobId, status: 'processing' };
+  }
+
+  private async runJobPipeline(ctx: JobPipelineContext): Promise<void> {
+    const {
+      jobId,
+      userId,
+      inputPath,
+      workDir,
+      originalFilename,
+      surfSessionId,
+      createdAt,
+      watermarkPath,
+      videoCfg,
+    } = ctx;
+
     const bins = {
       ffmpeg: videoCfg.ffmpegBin,
       ffprobe: videoCfg.ffprobeBin,
     };
 
-    try {
-      const jobId = uuidv4();
-      const processedPath = join(workDir, 'processed.webm');
+    const processedPath = join(workDir, 'processed.webm');
 
+    try {
       let durationSec: number;
       let hasAudio: boolean;
       try {
@@ -182,7 +267,7 @@ export class VideoProcessingService {
         contentType: 'video/webm',
       });
 
-      const snapshots: ProcessVideoResult['snapshots'] = [];
+      const snapshotKeys: string[] = [];
 
       for (let i = 0; i < snapshotPaths.length; i++) {
         const key = `${prefix}/snapshots/${String(i + 1).padStart(3, '0')}.jpg`;
@@ -191,43 +276,31 @@ export class VideoProcessingService {
           filePath: snapshotPaths[i],
           contentType: 'image/jpeg',
         });
-        snapshots.push({
-          key,
-          url: await this.s3.presignedGetUrl(key),
-        });
+        snapshotKeys.push(key);
       }
-
-      const processedUrl = await this.s3.presignedGetUrl(processedKey);
-      const createdAt = new Date().toISOString();
-      const snapshotKeys = snapshots.map((s) => s.key);
 
       const meta: VideoJobMeta = {
         userId,
         jobId,
         createdAt,
-        originalFilename: file.originalname ?? 'video',
+        originalFilename,
         processedKey,
         snapshotKeys,
         surfSessionId: surfSessionId ?? null,
       };
       await this.s3.putJson(`${prefix}/meta.json`, meta);
 
-      await this.videoJobModel.create({
-        userId,
-        jobId,
-        originalFilename: meta.originalFilename,
-        processedKey,
-        snapshotKeys,
-        createdAt,
-        surfSessionId: surfSessionId ?? null,
-      });
-
-      return {
-        jobId,
-        processedKey,
-        processedUrl,
-        snapshots,
-      };
+      await this.videoJobModel.updateOne(
+        { jobId },
+        {
+          $set: {
+            processedKey,
+            snapshotKeys,
+            status: 'completed',
+          },
+          $unset: { errorMessage: 1 },
+        },
+      );
     } finally {
       await rm(workDir, { recursive: true, force: true });
     }

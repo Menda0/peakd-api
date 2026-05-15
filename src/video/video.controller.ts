@@ -1,6 +1,8 @@
 import {
   Controller,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
   Post,
@@ -42,6 +44,7 @@ export class VideoController {
   }
 
   @Post('process')
+  @HttpCode(HttpStatus.ACCEPTED)
   @UseInterceptors(VideoFileInterceptor)
   async process(
     @AuthUserId() userId: string,

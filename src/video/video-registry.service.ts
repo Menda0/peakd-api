@@ -4,11 +4,14 @@ import { Model } from 'mongoose';
 import { validate as uuidValidate, version as uuidVersion } from 'uuid';
 import { S3Service } from '../s3/s3.service';
 import { VideoJob } from './schemas/video-job.schema';
+import type { VideoJobStatus } from './schemas/video-job.schema';
 
 export interface VideoJobListItemDto {
   jobId: string;
   originalFilename: string;
   createdAt: string;
+  status: VideoJobStatus;
+  errorMessage?: string | null;
   thumbnailUrl?: string;
   surfSessionId?: string | null;
 }
@@ -17,10 +20,25 @@ export interface VideoJobDetailDto {
   jobId: string;
   originalFilename: string;
   createdAt: string;
-  processedKey: string;
-  videoUrl: string;
+  status: VideoJobStatus;
+  errorMessage?: string | null;
+  processedKey?: string;
+  videoUrl?: string;
   snapshots: Array<{ key: string; url: string }>;
   surfSessionId?: string | null;
+}
+
+function normalizeJobStatus(doc: {
+  status?: VideoJobStatus;
+  processedKey?: string;
+}): VideoJobStatus {
+  if (doc.status === 'failed' || doc.status === 'processing') {
+    return doc.status;
+  }
+  if (doc.status === 'completed') {
+    return 'completed';
+  }
+  return doc.processedKey ? 'completed' : 'processing';
 }
 
 @Injectable()
@@ -55,7 +73,9 @@ export class VideoRegistryService {
     const items: VideoJobListItemDto[] = [];
 
     for (const doc of docs) {
-      const firstSnap = doc.snapshotKeys?.[0];
+      const status = normalizeJobStatus(doc);
+      const firstSnap =
+        status === 'completed' ? doc.snapshotKeys?.[0] : undefined;
       let thumbnailUrl: string | undefined;
       if (firstSnap) {
         thumbnailUrl = await this.s3.presignedGetUrl(firstSnap);
@@ -64,6 +84,8 @@ export class VideoRegistryService {
         jobId: doc.jobId,
         originalFilename: doc.originalFilename ?? 'video',
         createdAt: doc.createdAt,
+        status,
+        errorMessage: doc.errorMessage ?? null,
         thumbnailUrl,
         surfSessionId: doc.surfSessionId ?? null,
       });
@@ -81,6 +103,44 @@ export class VideoRegistryService {
       throw new NotFoundException(`Video job not found: ${jobId}`);
     }
 
+    const status = normalizeJobStatus(doc);
+
+    if (status === 'processing') {
+      return {
+        jobId: doc.jobId,
+        originalFilename: doc.originalFilename ?? 'video',
+        createdAt: doc.createdAt,
+        status: 'processing',
+        errorMessage: null,
+        snapshots: [],
+        surfSessionId: doc.surfSessionId ?? null,
+      };
+    }
+
+    if (status === 'failed') {
+      return {
+        jobId: doc.jobId,
+        originalFilename: doc.originalFilename ?? 'video',
+        createdAt: doc.createdAt,
+        status: 'failed',
+        errorMessage: doc.errorMessage ?? 'Processing failed',
+        snapshots: [],
+        surfSessionId: doc.surfSessionId ?? null,
+      };
+    }
+
+    if (!doc.processedKey) {
+      return {
+        jobId: doc.jobId,
+        originalFilename: doc.originalFilename ?? 'video',
+        createdAt: doc.createdAt,
+        status: 'processing',
+        errorMessage: null,
+        snapshots: [],
+        surfSessionId: doc.surfSessionId ?? null,
+      };
+    }
+
     const videoUrl = await this.s3.presignedGetUrl(doc.processedKey);
     const snapshots: VideoJobDetailDto['snapshots'] = [];
     for (const snapKey of doc.snapshotKeys ?? []) {
@@ -94,6 +154,8 @@ export class VideoRegistryService {
       jobId: doc.jobId,
       originalFilename: doc.originalFilename ?? 'video',
       createdAt: doc.createdAt,
+      status: 'completed',
+      errorMessage: null,
       processedKey: doc.processedKey,
       videoUrl,
       snapshots,
