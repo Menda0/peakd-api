@@ -4,6 +4,7 @@ import {
   Get,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
   Query,
   UseGuards,
@@ -78,5 +79,24 @@ export class StudioController {
     @Param('sessionId', new ParseUUIDPipe({ version: '4' })) sessionId: string,
   ) {
     return this.studio.getSession(userId, sessionId);
+  }
+
+  @Patch('sessions/:sessionId')
+  updateSession(
+    @AuthUserId() userId: string,
+    @Param('sessionId', new ParseUUIDPipe({ version: '4' })) sessionId: string,
+    @Body()
+    body: {
+      countryCode?: string;
+      regionId?: string;
+      spotId?: string;
+      sessionDate?: string;
+      sessionTime?: string;
+      durationMinutes?: number | string;
+      conditionsRating?: number | string | null;
+      waveTypes?: unknown;
+    },
+  ) {
+    return this.studio.updateSession(userId, sessionId, body);
   }
 }

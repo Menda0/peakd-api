@@ -10,6 +10,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { Region } from './schemas/region.schema';
 import { Spot } from './schemas/spot.schema';
 import { SurfSession } from './schemas/surf-session.schema';
+import { VideoJob } from '../video/schemas/video-job.schema';
+import { S3Service } from '../s3/s3.service';
 import { WAVE_TYPE_ID_SET } from './studio.constants';
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -47,6 +49,8 @@ export type SurfSessionListItemDto = {
   createdAt: string;
   spotName?: string;
   regionName?: string;
+  videoCount: number;
+  previewThumbnailUrls: string[];
 };
 
 export type SurfSessionDetailDto = SurfSessionListItemDto;
@@ -60,6 +64,9 @@ export class StudioService {
     private readonly spotModel: Model<Spot>,
     @InjectModel(SurfSession.name)
     private readonly surfSessionModel: Model<SurfSession>,
+    @InjectModel(VideoJob.name)
+    private readonly videoJobModel: Model<VideoJob>,
+    private readonly s3: S3Service,
   ) {}
 
   private regionVisibleQuery(userId: string, countryCode: string) {
@@ -130,7 +137,10 @@ export class StudioService {
     conditionsRating?: number | null;
     waveTypes?: string[];
     createdAt: string;
-  }): Omit<SurfSessionListItemDto, 'spotName' | 'regionName'> {
+  }): Omit<
+    SurfSessionListItemDto,
+    'spotName' | 'regionName' | 'videoCount' | 'previewThumbnailUrls'
+  > {
     return {
       sessionId: d.sessionId,
       countryCode: d.countryCode,
@@ -287,22 +297,94 @@ export class StudioService {
     };
   }
 
+  private async sessionVideoPreviews(
+    userId: string,
+    sessionIds: string[],
+  ): Promise<
+    Map<string, { videoCount: number; previewThumbnailUrls: string[] }>
+  > {
+    const out = new Map<
+      string,
+      { videoCount: number; previewThumbnailUrls: string[] }
+    >();
+    for (const sid of sessionIds) {
+      out.set(sid, { videoCount: 0, previewThumbnailUrls: [] });
+    }
+    if (sessionIds.length === 0) {
+      return out;
+    }
+
+    const jobs = await this.videoJobModel
+      .find({
+        userId,
+        surfSessionId: { $in: sessionIds },
+      })
+      .sort({ createdAt: -1 })
+      .lean()
+      .exec();
+
+    const counts = new Map<string, number>();
+    const thumbJobsBySession = new Map<
+      string,
+      Array<{ snapshotKey: string }>
+    >();
+
+    for (const job of jobs) {
+      const sid = job.surfSessionId;
+      if (!sid) continue;
+      counts.set(sid, (counts.get(sid) ?? 0) + 1);
+
+      const status = job.status ?? (job.processedKey ? 'completed' : 'processing');
+      const firstSnap = job.snapshotKeys?.[0];
+      if (status === 'completed' && firstSnap) {
+        const list = thumbJobsBySession.get(sid) ?? [];
+        if (list.length < 3) {
+          list.push({ snapshotKey: firstSnap });
+          thumbJobsBySession.set(sid, list);
+        }
+      }
+    }
+
+    for (const sid of sessionIds) {
+      const videoCount = counts.get(sid) ?? 0;
+      const picks = thumbJobsBySession.get(sid) ?? [];
+      const previewThumbnailUrls: string[] = [];
+      for (const pick of picks) {
+        previewThumbnailUrls.push(
+          await this.s3.presignedGetUrl(pick.snapshotKey),
+        );
+      }
+      out.set(sid, { videoCount, previewThumbnailUrls });
+    }
+
+    return out;
+  }
+
   async listSessions(userId: string): Promise<SurfSessionListItemDto[]> {
     const docs = await this.surfSessionModel
       .find({ userId })
       .sort({ createdAt: -1 })
       .lean()
       .exec();
+    const sessionIds = docs.map((d) => d.sessionId);
+    const previews = await this.sessionVideoPreviews(userId, sessionIds);
+
     const items: SurfSessionListItemDto[] = [];
     for (const d of docs) {
       const [spot, region] = await Promise.all([
         this.spotModel.findOne({ spotId: d.spotId }).lean().exec(),
         this.regionModel.findOne({ regionId: d.regionId }).lean().exec(),
       ]);
+      const preview = previews.get(d.sessionId) ?? {
+        videoCount: 0,
+        previewThumbnailUrls: [],
+      };
       items.push({
         ...this.sessionCoreDto(d),
         spotName: spot?.name,
         regionName: region?.name,
+        videoCount: preview.videoCount,
+        previewThumbnailUrls: preview.previewThumbnailUrls,
       });
     }
     return items;
@@ -323,10 +405,15 @@ export class StudioService {
       this.spotModel.findOne({ spotId: d.spotId }).lean().exec(),
       this.regionModel.findOne({ regionId: d.regionId }).lean().exec(),
     ]);
+    const preview = (
+      await this.sessionVideoPreviews(userId, [sessionId])
+    ).get(sessionId) ?? { videoCount: 0, previewThumbnailUrls: [] };
     return {
       ...this.sessionCoreDto(d),
       spotName: spot?.name,
       regionName: region?.name,
+      videoCount: preview.videoCount,
+      previewThumbnailUrls: preview.previewThumbnailUrls,
     };
   }
 
@@ -343,6 +430,85 @@ export class StudioService {
       waveTypes?: unknown;
     },
   ): Promise<SurfSessionDetailDto> {
+    const payload = await this.resolveSessionPayload(userId, body);
+    const sessionId = uuidv4();
+    const createdAt = new Date().toISOString();
+    await this.surfSessionModel.create({
+      sessionId,
+      userId,
+      ...payload,
+      createdAt,
+    });
+    return this.getSession(userId, sessionId);
+  }
+
+  async updateSession(
+    userId: string,
+    sessionId: string,
+    body: {
+      countryCode?: string;
+      regionId?: string;
+      spotId?: string;
+      sessionDate?: string;
+      sessionTime?: string;
+      durationMinutes?: number | string;
+      conditionsRating?: number | string | null;
+      waveTypes?: unknown;
+    },
+  ): Promise<SurfSessionDetailDto> {
+    const existing = await this.surfSessionModel
+      .findOne({ sessionId, userId })
+      .lean()
+      .exec();
+    if (!existing) {
+      throw new NotFoundException('Session not found');
+    }
+
+    const payload = await this.resolveSessionPayload(userId, body);
+
+    await this.surfSessionModel
+      .updateOne(
+        { sessionId, userId },
+        {
+          $set: {
+            countryCode: payload.countryCode,
+            regionId: payload.regionId,
+            spotId: payload.spotId,
+            sessionDate: payload.sessionDate,
+            sessionTime: payload.sessionTime,
+            durationMinutes: payload.durationMinutes,
+            conditionsRating: payload.conditionsRating,
+            waveTypes: payload.waveTypes,
+          },
+        },
+      )
+      .exec();
+
+    return this.getSession(userId, sessionId);
+  }
+
+  private async resolveSessionPayload(
+    userId: string,
+    body: {
+      countryCode?: string;
+      regionId?: string;
+      spotId?: string;
+      sessionDate?: string;
+      sessionTime?: string;
+      durationMinutes?: number | string;
+      conditionsRating?: number | string | null;
+      waveTypes?: unknown;
+    },
+  ): Promise<{
+    countryCode: string;
+    regionId: string;
+    spotId: string;
+    sessionDate: string;
+    sessionTime: string;
+    durationMinutes: number;
+    conditionsRating: number | null;
+    waveTypes: string[];
+  }> {
     const countryCode = normalizeCountryCode(
       typeof body.countryCode === 'string' ? body.countryCode : '',
     );
@@ -417,11 +583,8 @@ export class StudioService {
     if (!this.isSpotVisibleToUser(userId, spot)) {
       throw new ForbiddenException('Spot not accessible');
     }
-    const sessionId = uuidv4();
-    const createdAt = new Date().toISOString();
-    await this.surfSessionModel.create({
-      sessionId,
-      userId,
+
+    return {
       countryCode,
       regionId,
       spotId,
@@ -430,9 +593,7 @@ export class StudioService {
       durationMinutes,
       conditionsRating,
       waveTypes,
-      createdAt,
-    });
-    return this.getSession(userId, sessionId);
+    };
   }
 
   async assertSessionOwnedByUser(
