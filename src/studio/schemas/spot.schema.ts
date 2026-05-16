@@ -14,6 +14,15 @@ export class Spot {
   @Prop({ required: true, trim: true })
   name: string;
 
+  @Prop({ type: String, default: null })
+  level: string | null;
+
+  @Prop({ type: String, default: null })
+  breakType: string | null;
+
+  @Prop({ type: String, default: null })
+  consistency: string | null;
+
   @Prop({ default: false, index: true })
   verified: boolean;
 
