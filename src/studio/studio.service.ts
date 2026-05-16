@@ -83,36 +83,51 @@ export class StudioService {
     private readonly s3: S3Service,
   ) {}
 
+  /** Documents without `disabled: true` (missing field = enabled). */
+  private static readonly notDisabled = { disabled: { $ne: true } };
+
+  private static readonly verifiedTrue = { verified: true as const };
+
+  private static isVerifiedValue(verified: unknown): boolean {
+    return verified === true || verified === 1 || verified === 'true';
+  }
+
   private regionVisibleQuery(userId: string, countryCode: string) {
     return {
       countryCode,
-      disabled: false,
-      $or: [{ createdByUserId: userId }, { verified: true }],
+      ...StudioService.notDisabled,
+      $or: [{ createdByUserId: userId }, StudioService.verifiedTrue],
     };
   }
 
   private spotVisibleQuery(userId: string, regionId: string) {
     return {
       regionId,
-      disabled: false,
-      $or: [{ createdByUserId: userId }, { verified: true }],
+      ...StudioService.notDisabled,
+      $or: [{ createdByUserId: userId }, StudioService.verifiedTrue],
     };
   }
 
   private isRegionVisibleToUser(
     userId: string,
-    region: { createdByUserId: string; verified: boolean; disabled?: boolean },
+    region: { createdByUserId: string; verified: unknown; disabled?: boolean },
   ): boolean {
-    if (region.disabled) return false;
-    return region.createdByUserId === userId || region.verified === true;
+    if (region.disabled === true) return false;
+    return (
+      region.createdByUserId === userId ||
+      StudioService.isVerifiedValue(region.verified)
+    );
   }
 
   private isSpotVisibleToUser(
     userId: string,
-    spot: { createdByUserId: string; verified: boolean; disabled?: boolean },
+    spot: { createdByUserId: string; verified: unknown; disabled?: boolean },
   ): boolean {
-    if (spot.disabled) return false;
-    return spot.createdByUserId === userId || spot.verified === true;
+    if (spot.disabled === true) return false;
+    return (
+      spot.createdByUserId === userId ||
+      StudioService.isVerifiedValue(spot.verified)
+    );
   }
 
   private normalizeWaveTypes(raw: unknown): string[] {
@@ -248,7 +263,11 @@ export class StudioService {
       .findOne({ regionId, countryCode })
       .lean()
       .exec();
-    if (!region || !region.verified || region.disabled) {
+    if (
+      !region ||
+      region.disabled === true ||
+      !StudioService.isVerifiedValue(region.verified)
+    ) {
       return null;
     }
     if (!this.isRegionVisibleToUser(userId, region)) {
@@ -265,13 +284,21 @@ export class StudioService {
   async listRegions(
     userId: string,
     countryCodeRaw: string,
+    verifiedOnly = false,
   ): Promise<RegionListItemDto[]> {
     const countryCode = normalizeCountryCode(countryCodeRaw);
     if (!COUNTRY_CODE.test(countryCode)) {
       throw new BadRequestException('Invalid countryCode');
     }
+    const query = verifiedOnly
+      ? {
+          countryCode,
+          ...StudioService.notDisabled,
+          ...StudioService.verifiedTrue,
+        }
+      : this.regionVisibleQuery(userId, countryCode);
     const docs = await this.regionModel
-      .find(this.regionVisibleQuery(userId, countryCode))
+      .find(query)
       .sort({ verified: -1, name: 1 })
       .lean()
       .exec();
@@ -321,6 +348,7 @@ export class StudioService {
   async listSpots(
     userId: string,
     regionId: string,
+    verifiedOnly = false,
   ): Promise<SpotListItemDto[]> {
     if (!regionId?.trim()) {
       throw new BadRequestException('regionId is required');
@@ -335,8 +363,15 @@ export class StudioService {
     if (!this.isRegionVisibleToUser(userId, region)) {
       throw new ForbiddenException('Region not accessible');
     }
+    const query = verifiedOnly
+      ? {
+          regionId: region.regionId,
+          ...StudioService.notDisabled,
+          ...StudioService.verifiedTrue,
+        }
+      : this.spotVisibleQuery(userId, region.regionId);
     const docs = await this.spotModel
-      .find(this.spotVisibleQuery(userId, region.regionId))
+      .find(query)
       .sort({ verified: -1, name: 1 })
       .lean()
       .exec();

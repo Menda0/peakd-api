@@ -29,8 +29,13 @@ export class StudioController {
   listRegions(
     @AuthUserId() userId: string,
     @Query('countryCode') countryCode: string,
+    @Query('verifiedOnly') verifiedOnly?: string,
   ) {
-    return this.studio.listRegions(userId, countryCode ?? '');
+    return this.studio.listRegions(
+      userId,
+      countryCode ?? '',
+      verifiedOnly === 'true' || verifiedOnly === '1',
+    );
   }
 
   @Post('regions')
@@ -45,8 +50,13 @@ export class StudioController {
   listSpots(
     @AuthUserId() userId: string,
     @Query('regionId') regionId: string,
+    @Query('verifiedOnly') verifiedOnly?: string,
   ) {
-    return this.studio.listSpots(userId, regionId ?? '');
+    return this.studio.listSpots(
+      userId,
+      regionId ?? '',
+      verifiedOnly === 'true' || verifiedOnly === '1',
+    );
   }
 
   @Post('spots')
