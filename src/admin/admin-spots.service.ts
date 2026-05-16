@@ -8,6 +8,11 @@ import { Model } from 'mongoose';
 import { v4 as uuidv4 } from 'uuid';
 import { Spot } from '../studio/schemas/spot.schema';
 import { Region } from '../studio/schemas/region.schema';
+import {
+  normalizeSpotBreakType,
+  normalizeSpotConsistency,
+  normalizeSpotLevel,
+} from '../studio/spot-attributes';
 
 export type AdminSpotDto = {
   spotId: string;
@@ -96,18 +101,9 @@ export class AdminSpotsService {
       spotId,
       regionId: region.regionId,
       name,
-      level:
-        body.level === undefined || body.level === null
-          ? null
-          : String(body.level).trim() || null,
-      breakType:
-        body.breakType === undefined || body.breakType === null
-          ? null
-          : String(body.breakType).trim() || null,
-      consistency:
-        body.consistency === undefined || body.consistency === null
-          ? null
-          : String(body.consistency).trim() || null,
+      level: normalizeSpotLevel(body.level),
+      breakType: normalizeSpotBreakType(body.breakType),
+      consistency: normalizeSpotConsistency(body.consistency),
       verified,
       disabled: false,
       verifiedAt: verified ? now : null,
@@ -153,22 +149,13 @@ export class AdminSpotsService {
     }
 
     if (body.level !== undefined) {
-      updates.level =
-        body.level === null
-          ? null
-          : String(body.level).trim() || null;
+      updates.level = normalizeSpotLevel(body.level);
     }
     if (body.breakType !== undefined) {
-      updates.breakType =
-        body.breakType === null
-          ? null
-          : String(body.breakType).trim() || null;
+      updates.breakType = normalizeSpotBreakType(body.breakType);
     }
     if (body.consistency !== undefined) {
-      updates.consistency =
-        body.consistency === null
-          ? null
-          : String(body.consistency).trim() || null;
+      updates.consistency = normalizeSpotConsistency(body.consistency);
     }
 
     if (body.disabled !== undefined) {
