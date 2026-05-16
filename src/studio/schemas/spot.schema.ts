@@ -26,6 +26,9 @@ export class Spot {
   @Prop({ default: false, index: true })
   verified: boolean;
 
+  @Prop({ default: false, index: true })
+  disabled: boolean;
+
   @Prop({ type: String, default: null })
   verifiedAt: string | null;
 

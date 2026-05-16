@@ -86,6 +86,7 @@ export class StudioService {
   private regionVisibleQuery(userId: string, countryCode: string) {
     return {
       countryCode,
+      disabled: false,
       $or: [{ createdByUserId: userId }, { verified: true }],
     };
   }
@@ -93,21 +94,24 @@ export class StudioService {
   private spotVisibleQuery(userId: string, regionId: string) {
     return {
       regionId,
+      disabled: false,
       $or: [{ createdByUserId: userId }, { verified: true }],
     };
   }
 
   private isRegionVisibleToUser(
     userId: string,
-    region: { createdByUserId: string; verified: boolean },
+    region: { createdByUserId: string; verified: boolean; disabled?: boolean },
   ): boolean {
+    if (region.disabled) return false;
     return region.createdByUserId === userId || region.verified === true;
   }
 
   private isSpotVisibleToUser(
     userId: string,
-    spot: { createdByUserId: string; verified: boolean },
+    spot: { createdByUserId: string; verified: boolean; disabled?: boolean },
   ): boolean {
+    if (spot.disabled) return false;
     return spot.createdByUserId === userId || spot.verified === true;
   }
 
@@ -244,7 +248,7 @@ export class StudioService {
       .findOne({ regionId, countryCode })
       .lean()
       .exec();
-    if (!region || !region.verified) {
+    if (!region || !region.verified || region.disabled) {
       return null;
     }
     if (!this.isRegionVisibleToUser(userId, region)) {
@@ -300,6 +304,7 @@ export class StudioService {
       countryCode,
       name,
       verified: false,
+      disabled: false,
       verifiedAt: null,
       verifierCount: 0,
       createdByUserId: userId,
@@ -373,6 +378,7 @@ export class StudioService {
       regionId,
       name,
       verified: false,
+      disabled: false,
       verifiedAt: null,
       verifierCount: 0,
       createdByUserId: userId,
