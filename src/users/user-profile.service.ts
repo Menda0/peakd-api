@@ -12,8 +12,6 @@ export interface UserProfileResponseDto {
   countryCode: string | null;
   homeRegionId: string | null;
   surfLevel: SurfLevel | null;
-  /** UTC date YYYY-MM-DD of last onboarding prompt record, if any. */
-  onboardingPromptDayUtc: string | null;
 }
 
 export interface UserProfilePatchBody {
@@ -52,7 +50,6 @@ export class UserProfileService {
     countryCode: string | null;
     homeRegionId: string | null;
     surfLevel: string | null;
-    onboardingPromptDayUtc?: string | null;
   }): UserProfileResponseDto {
     const sl = doc.surfLevel;
     const surfLevel =
@@ -63,7 +60,6 @@ export class UserProfileService {
       countryCode: doc.countryCode,
       homeRegionId: doc.homeRegionId,
       surfLevel,
-      onboardingPromptDayUtc: doc.onboardingPromptDayUtc ?? null,
     };
   }
 
@@ -77,7 +73,6 @@ export class UserProfileService {
         countryCode: null,
         homeRegionId: null,
         surfLevel: null,
-        onboardingPromptDayUtc: null,
       });
       doc = await this.userProfileModel.findOne({ userId }).lean().exec();
     }
@@ -205,7 +200,6 @@ export class UserProfileService {
       countryCode: null,
       homeRegionId: null,
       surfLevel: null,
-      onboardingPromptDayUtc: null,
     };
     const setOnInsert = Object.fromEntries(
       Object.entries(defaultsOnInsert).filter(([key]) => !(key in patch)),
@@ -220,24 +214,6 @@ export class UserProfileService {
       .lean()
       .exec();
 
-    if (!updated) {
-      throw new NotFoundException('User profile');
-    }
-    return this.toDto(updated);
-  }
-
-  /** Sets `onboardingPromptDayUtc` to today's UTC calendar day (for analytics / caps). */
-  async recordOnboardingPrompt(userId: string): Promise<UserProfileResponseDto> {
-    await this.getMe(userId);
-    const day = new Date().toISOString().slice(0, 10);
-    const updated = await this.userProfileModel
-      .findOneAndUpdate(
-        { userId },
-        { $set: { onboardingPromptDayUtc: day } },
-        { returnDocument: 'after' },
-      )
-      .lean()
-      .exec();
     if (!updated) {
       throw new NotFoundException('User profile');
     }
