@@ -25,6 +25,10 @@ export class UserProfile {
   /** beginner | intermediate | advanced */
   @Prop({ type: String, default: null })
   surfLevel: string | null;
+
+  /** UTC calendar day (YYYY-MM-DD) when the onboarding nudge was last recorded (dismiss or prompt). */
+  @Prop({ type: String, default: null })
+  onboardingPromptDayUtc: string | null;
 }
 
 export const UserProfileSchema = SchemaFactory.createForClass(UserProfile);

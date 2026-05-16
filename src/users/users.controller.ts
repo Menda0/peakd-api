@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Patch, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Patch, Post, UseGuards } from '@nestjs/common';
 import { Auth0JwtGuard } from '../auth/auth0-jwt.guard';
 import { AuthUserId } from '../auth/auth-user.decorator';
 import {
@@ -22,5 +22,10 @@ export class UsersController {
     @Body() body: Record<string, unknown>,
   ) {
     return this.userProfiles.patchMe(userId, body as UserProfilePatchBody);
+  }
+
+  @Post('me/onboarding-prompt')
+  recordOnboardingPrompt(@AuthUserId() userId: string) {
+    return this.userProfiles.recordOnboardingPrompt(userId);
   }
 }
