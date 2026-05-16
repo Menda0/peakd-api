@@ -223,6 +223,41 @@ export class StudioService {
     return 'idle';
   }
 
+  /**
+   * Verified region for a country, visible to the user (verified regions are public;
+   * unverified regions only visible to creator — must still be verified here).
+   */
+  async findVerifiedRegionForCountry(
+    userId: string,
+    regionIdRaw: string,
+    countryCodeRaw: string,
+  ): Promise<RegionListItemDto | null> {
+    const countryCode = normalizeCountryCode(countryCodeRaw);
+    if (!COUNTRY_CODE.test(countryCode)) {
+      throw new BadRequestException('Invalid countryCode');
+    }
+    const regionId = typeof regionIdRaw === 'string' ? regionIdRaw.trim() : '';
+    if (!regionId) {
+      return null;
+    }
+    const region = await this.regionModel
+      .findOne({ regionId, countryCode })
+      .lean()
+      .exec();
+    if (!region || !region.verified) {
+      return null;
+    }
+    if (!this.isRegionVisibleToUser(userId, region)) {
+      return null;
+    }
+    return {
+      regionId: region.regionId,
+      countryCode: region.countryCode,
+      name: region.name,
+      verified: Boolean(region.verified),
+    };
+  }
+
   async listRegions(
     userId: string,
     countryCodeRaw: string,

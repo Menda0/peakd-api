@@ -3,6 +3,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
 import { VideoModule } from './video/video.module';
 import { PartnerModule } from './partner/partner.module';
+import { UsersModule } from './users/users.module';
 import { StudioModule } from './studio/studio.module';
 import { S3Module } from './s3/s3.module';
 import { videoConfig } from './config/video.config';
@@ -25,6 +26,7 @@ import { auth0Config } from './config/auth0.config';
     VideoModule,
     StudioModule,
     PartnerModule,
+    UsersModule,
   ],
 })
 export class AppModule {}
