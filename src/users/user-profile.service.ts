@@ -1,6 +1,10 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
+import { randomUUID } from 'node:crypto';
+import type { Express } from 'express';
 import { Model } from 'mongoose';
+import { S3Service } from '../s3/s3.service';
 import { StudioService } from '../studio/studio.service';
 import { UserProfile } from './schemas/user-profile.schema';
 
@@ -12,6 +16,7 @@ export interface UserProfileResponseDto {
   countryCode: string | null;
   homeRegionId: string | null;
   surfLevel: SurfLevel | null;
+  avatarUrl: string | null;
 }
 
 export interface UserProfilePatchBody {
@@ -20,13 +25,23 @@ export interface UserProfilePatchBody {
   countryCode?: string | null;
   homeRegionId?: string | null;
   surfLevel?: string | null;
+  avatarKey?: string | null;
 }
 
 const SURF_LEVELS: SurfLevel[] = ['beginner', 'intermediate', 'advanced'];
 
+const AVATAR_MIME_TO_EXT: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+};
+
 @Injectable()
 export class UserProfileService {
   constructor(
+    private readonly config: ConfigService,
+    private readonly s3: S3Service,
     @InjectModel(UserProfile.name)
     private readonly userProfileModel: Model<UserProfile>,
     private readonly studio: StudioService,
@@ -44,22 +59,56 @@ export class UserProfileService {
     );
   }
 
-  private toDto(doc: {
+  private avatarKeyPrefix(userId: string): string {
+    const safe = encodeURIComponent(userId);
+    return `users/avatars/${safe}/`;
+  }
+
+  private isValidAvatarKeyForUser(userId: string, key: string | null): boolean {
+    if (key === null) return true;
+    const prefix = this.avatarKeyPrefix(userId);
+    return key.startsWith(prefix) && key.length > prefix.length;
+  }
+
+  private getAvatarGetExpirySeconds(): number {
+    return Number(
+      this.config.get<string>('USER_AVATAR_GET_URL_EXPIRY_SECONDS') ??
+        this.config.get<string>('PARTNER_AVATAR_GET_URL_EXPIRY_SECONDS') ??
+        '604800',
+    );
+  }
+
+  private async resolveAvatarUrl(avatarKey: string | null): Promise<string | null> {
+    if (!avatarKey) return null;
+    const publicBase = this.config.get<string>('S3_PUBLIC_BASE_URL')?.trim();
+    if (publicBase) {
+      return `${publicBase.replace(/\/+$/, '')}/${avatarKey}`;
+    }
+    return this.s3.presignedGetUrl(
+      avatarKey,
+      this.getAvatarGetExpirySeconds(),
+    );
+  }
+
+  private async toDto(doc: {
     displayName: string | null;
     nickname: string | null;
     countryCode: string | null;
     homeRegionId: string | null;
     surfLevel: string | null;
-  }): UserProfileResponseDto {
+    avatarKey?: string | null;
+  }): Promise<UserProfileResponseDto> {
     const sl = doc.surfLevel;
     const surfLevel =
       sl && (SURF_LEVELS as string[]).includes(sl) ? (sl as SurfLevel) : null;
+    const avatarKey = doc.avatarKey ?? null;
     return {
       displayName: doc.displayName,
       nickname: doc.nickname,
       countryCode: doc.countryCode,
       homeRegionId: doc.homeRegionId,
       surfLevel,
+      avatarUrl: await this.resolveAvatarUrl(avatarKey),
     };
   }
 
@@ -73,6 +122,7 @@ export class UserProfileService {
         countryCode: null,
         homeRegionId: null,
         surfLevel: null,
+        avatarKey: null,
       });
       doc = await this.userProfileModel.findOne({ userId }).lean().exec();
     }
@@ -189,6 +239,19 @@ export class UserProfileService {
       patch.surfLevel = this.parseSurfLevel(body.surfLevel);
     }
 
+    if ('avatarKey' in body) {
+      if (body.avatarKey === null || body.avatarKey === undefined) {
+        patch.avatarKey = null;
+      } else if (typeof body.avatarKey === 'string') {
+        if (!this.isValidAvatarKeyForUser(userId, body.avatarKey)) {
+          throw new BadRequestException('Invalid avatarKey');
+        }
+        patch.avatarKey = body.avatarKey;
+      } else {
+        throw new BadRequestException('avatarKey must be a string or null');
+      }
+    }
+
     if (Object.keys(patch).length === 0) {
       return this.toDto(base);
     }
@@ -200,6 +263,7 @@ export class UserProfileService {
       countryCode: null,
       homeRegionId: null,
       surfLevel: null,
+      avatarKey: null,
     };
     const setOnInsert = Object.fromEntries(
       Object.entries(defaultsOnInsert).filter(([key]) => !(key in patch)),
@@ -218,5 +282,29 @@ export class UserProfileService {
       throw new NotFoundException('User profile');
     }
     return this.toDto(updated);
+  }
+
+  /** Multipart upload: stores object in S3 and persists `avatarKey` (avoids browser PUT to S3 / CORS). */
+  async uploadAvatarMultipart(
+    userId: string,
+    file: Express.Multer.File,
+  ): Promise<UserProfileResponseDto> {
+    const ct = file.mimetype.trim().toLowerCase();
+    if (!AVATAR_MIME_TO_EXT[ct]) {
+      throw new BadRequestException(
+        'Avatar must be image/jpeg, image/png, image/webp, or image/gif',
+      );
+    }
+    if (!file.buffer?.length) {
+      throw new BadRequestException('Empty file');
+    }
+    const ext = AVATAR_MIME_TO_EXT[ct];
+    const avatarKey = `${this.avatarKeyPrefix(userId)}${randomUUID()}.${ext}`;
+    await this.s3.putObjectBytes({
+      key: avatarKey,
+      body: file.buffer,
+      contentType: ct,
+    });
+    return this.patchMe(userId, { avatarKey });
   }
 }

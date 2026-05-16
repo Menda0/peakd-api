@@ -25,6 +25,10 @@ export class UserProfile {
   /** beginner | intermediate | advanced */
   @Prop({ type: String, default: null })
   surfLevel: string | null;
+
+  /** S3 object key for the app user profile avatar image. */
+  @Prop({ type: String, default: null })
+  avatarKey: string | null;
 }
 
 export const UserProfileSchema = SchemaFactory.createForClass(UserProfile);
