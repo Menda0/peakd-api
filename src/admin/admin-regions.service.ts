@@ -7,6 +7,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { v4 as uuidv4 } from 'uuid';
 import { Region } from '../studio/schemas/region.schema';
+import { Spot } from '../studio/schemas/spot.schema';
 
 const COUNTRY_CODE = /^[A-Z]{2}$/;
 
@@ -22,6 +23,7 @@ export type AdminRegionDto = {
   verifiedAt: string | null;
   verifierCount: number;
   disabled: boolean;
+  spotCount: number;
   createdByUserId: string;
   createdAt: string;
 };
@@ -31,9 +33,11 @@ export class AdminRegionsService {
   constructor(
     @InjectModel(Region.name)
     private readonly regionModel: Model<Region>,
+    @InjectModel(Spot.name)
+    private readonly spotModel: Model<Spot>,
   ) {}
 
-  private toDto(d: Region): AdminRegionDto {
+  private toDto(d: Region, spotCount = 0): AdminRegionDto {
     return {
       regionId: d.regionId,
       countryCode: d.countryCode,
@@ -42,9 +46,41 @@ export class AdminRegionsService {
       verifiedAt: d.verifiedAt ?? null,
       verifierCount: d.verifierCount ?? 0,
       disabled: Boolean(d.disabled),
+      spotCount,
       createdByUserId: d.createdByUserId,
       createdAt: d.createdAt,
     };
+  }
+
+  private async spotCountsByRegionId(
+    regionIds: string[],
+  ): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    if (regionIds.length === 0) return out;
+    const rows = await this.spotModel
+      .aggregate<{ _id: string; count: number }>([
+        { $match: { regionId: { $in: regionIds } } },
+        { $group: { _id: '$regionId', count: { $sum: 1 } } },
+      ])
+      .exec();
+    for (const row of rows) {
+      out.set(row._id, row.count);
+    }
+    return out;
+  }
+
+  async getRegion(regionIdRaw: string): Promise<AdminRegionDto> {
+    const regionId =
+      typeof regionIdRaw === 'string' ? regionIdRaw.trim() : '';
+    if (!regionId) {
+      throw new BadRequestException('regionId is required');
+    }
+    const region = await this.regionModel.findOne({ regionId }).lean().exec();
+    if (!region) {
+      throw new NotFoundException('Region not found');
+    }
+    const spotCounts = await this.spotCountsByRegionId([region.regionId]);
+    return this.toDto(region as Region, spotCounts.get(region.regionId) ?? 0);
   }
 
   async listRegions(countryCodeRaw: string): Promise<AdminRegionDto[]> {
@@ -57,7 +93,11 @@ export class AdminRegionsService {
       .sort({ disabled: 1, verified: -1, name: 1 })
       .lean()
       .exec();
-    return docs.map((d) => this.toDto(d as Region));
+    const regionIds = docs.map((d) => d.regionId);
+    const spotCounts = await this.spotCountsByRegionId(regionIds);
+    return docs.map((d) =>
+      this.toDto(d as Region, spotCounts.get(d.regionId) ?? 0),
+    );
   }
 
   async createRegion(
@@ -88,7 +128,7 @@ export class AdminRegionsService {
       createdByUserId: userId,
       createdAt: now,
     });
-    return this.toDto(doc.toObject());
+    return this.toDto(doc.toObject(), 0);
   }
 
   async updateRegion(
@@ -147,13 +187,21 @@ export class AdminRegionsService {
       }
     }
 
+    const spotCounts = await this.spotCountsByRegionId([region.regionId]);
+
     if (Object.keys(updates).length === 0) {
-      return this.toDto(region.toObject());
+      return this.toDto(
+        region.toObject(),
+        spotCounts.get(region.regionId) ?? 0,
+      );
     }
 
     region.set(updates);
     await region.save();
-    return this.toDto(region.toObject());
+    return this.toDto(
+      region.toObject(),
+      spotCounts.get(region.regionId) ?? 0,
+    );
   }
 
   async disableRegion(regionIdRaw: string): Promise<AdminRegionDto> {
