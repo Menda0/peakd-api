@@ -46,15 +46,23 @@ export interface DiscoverFeedLocationDto {
   isUndisclosed: boolean;
 }
 
+export interface DiscoverFeedSessionDto {
+  sessionDate: string;
+  sessionTime: string;
+  durationMinutes: number;
+  conditionsRating: number | null;
+  waveTypes: string[];
+}
+
 export interface DiscoverFeedItemDto {
   jobId: string;
   createdAt: string;
   status: VideoJobStatus;
   videoUrl: string | null;
   thumbnailUrl: string | null;
-  title: string;
   author: DiscoverFeedAuthorDto;
   location: DiscoverFeedLocationDto;
+  session: DiscoverFeedSessionDto;
   shakaCount: number;
   followedByViewer: boolean;
   claimStatus: VideoClaimStatus;
@@ -65,10 +73,10 @@ export interface MyVideoItemDto {
   jobId: string;
   createdAt: string;
   status: VideoJobStatus;
-  title: string;
   thumbnailUrl: string | null;
   videoUrl: string | null;
   location: DiscoverFeedLocationDto;
+  session: DiscoverFeedSessionDto;
   claimStatus: VideoClaimStatus;
   discoverPublishedAt: string | null;
 }
@@ -96,6 +104,11 @@ type AggregatedRow = {
     countryCode: string;
     regionId: string;
     spotId: string;
+    sessionDate: string;
+    sessionTime?: string;
+    durationMinutes?: number;
+    conditionsRating?: number | null;
+    waveTypes?: string[];
   };
   authorProfile?: Array<{
     displayName: string | null;
@@ -230,10 +243,10 @@ export class FeedService {
         jobId: dto.jobId,
         createdAt: dto.createdAt,
         status: dto.status,
-        title: dto.title,
         thumbnailUrl: dto.thumbnailUrl,
         videoUrl: dto.videoUrl,
         location: dto.location,
+        session: dto.session,
         claimStatus: dto.claimStatus,
         discoverPublishedAt: doc.discoverPublishedAt ?? null,
       });
@@ -373,6 +386,36 @@ export class FeedService {
     return { items, nextCursor, hasMore };
   }
 
+  private sessionToDto(session: {
+    sessionDate: string;
+    sessionTime?: string;
+    durationMinutes?: number;
+    conditionsRating?: number | null;
+    waveTypes?: string[];
+  }): DiscoverFeedSessionDto {
+    const rating = session.conditionsRating;
+    const conditionsRating =
+      typeof rating === 'number' &&
+      Number.isInteger(rating) &&
+      rating >= 1 &&
+      rating <= 5
+        ? rating
+        : null;
+    return {
+      sessionDate: session.sessionDate,
+      sessionTime: session.sessionTime?.trim() || '12:00',
+      durationMinutes:
+        typeof session.durationMinutes === 'number' &&
+        session.durationMinutes >= 15
+          ? session.durationMinutes
+          : 120,
+      conditionsRating,
+      waveTypes: Array.isArray(session.waveTypes)
+        ? session.waveTypes.filter((w) => typeof w === 'string')
+        : [],
+    };
+  }
+
   private normalizeStatus(doc: {
     status?: VideoJobStatus;
     processedKey?: string | null;
@@ -448,7 +491,6 @@ export class FeedService {
       status,
       videoUrl,
       thumbnailUrl,
-      title: doc.originalFilename?.replace(/\.[^.]+$/, '') || 'Surf video',
       author: {
         userId: doc.userId,
         displayName: authorProfile?.displayName ?? null,
@@ -461,6 +503,7 @@ export class FeedService {
         spotName,
         isUndisclosed,
       },
+      session: this.sessionToDto(session),
       shakaCount: 0,
       followedByViewer: false,
       claimStatus: doc.claimStatus ?? 'none',
@@ -499,7 +542,6 @@ export class FeedService {
       status: this.normalizeStatus(row),
       videoUrl,
       thumbnailUrl,
-      title: row.originalFilename?.replace(/\.[^.]+$/, '') || 'Surf video',
       author: {
         userId: row.userId,
         displayName: authorDoc?.displayName ?? null,
@@ -512,6 +554,7 @@ export class FeedService {
         spotName,
         isUndisclosed,
       },
+      session: this.sessionToDto(session),
       shakaCount: 0,
       followedByViewer: false,
       claimStatus: row.claimStatus ?? 'none',
