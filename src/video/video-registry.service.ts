@@ -19,6 +19,7 @@ export interface VideoJobListItemDto {
   /** Up to four snapshot presigned URLs for list/detail previews. */
   thumbnailUrls: string[];
   surfSessionId?: string | null;
+  discoverPublishedAt?: string | null;
 }
 
 export interface VideoJobDetailDto {
@@ -96,6 +97,7 @@ export class VideoRegistryService {
         thumbnailUrl: thumbnailUrls[0],
         thumbnailUrls,
         surfSessionId: doc.surfSessionId ?? null,
+        discoverPublishedAt: doc.discoverPublishedAt ?? null,
       });
     }
 

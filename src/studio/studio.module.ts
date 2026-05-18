@@ -9,6 +9,10 @@ import { StudioService } from './studio.service';
 import { Auth0JwtGuard } from '../auth/auth0-jwt.guard';
 import { S3Module } from '../s3/s3.module';
 import { VideoJob, VideoJobSchema } from '../video/schemas/video-job.schema';
+import {
+  PartnerProfile,
+  PartnerProfileSchema,
+} from '../partner/schemas/partner-profile.schema';
 
 @Module({
   imports: [
@@ -18,6 +22,7 @@ import { VideoJob, VideoJobSchema } from '../video/schemas/video-job.schema';
       { name: Spot.name, schema: SpotSchema },
       { name: SurfSession.name, schema: SurfSessionSchema },
       { name: VideoJob.name, schema: VideoJobSchema },
+      { name: PartnerProfile.name, schema: PartnerProfileSchema },
     ]),
   ],
   controllers: [StudioController],

@@ -17,6 +17,7 @@ import { Model } from 'mongoose';
 import { S3Service } from '../s3/s3.service';
 import { SurfSession } from './schemas/surf-session.schema';
 import { VideoJob } from '../video/schemas/video-job.schema';
+import { PartnerProfile } from '../partner/schemas/partner-profile.schema';
 import { StudioService } from './studio.service';
 
 export type CloseSessionResult = {
@@ -58,6 +59,8 @@ export class SessionExportService {
     private readonly surfSessionModel: Model<SurfSession>,
     @InjectModel(VideoJob.name)
     private readonly videoJobModel: Model<VideoJob>,
+    @InjectModel(PartnerProfile.name)
+    private readonly partnerProfileModel: Model<PartnerProfile>,
     private readonly s3: S3Service,
     private readonly studio: StudioService,
     private readonly config: ConfigService,
@@ -106,6 +109,27 @@ export class SessionExportService {
         },
       )
       .exec();
+
+    const partner = await this.partnerProfileModel
+      .findOne({ userId })
+      .lean()
+      .exec();
+    if (partner) {
+      await this.videoJobModel
+        .updateMany(
+          {
+            userId,
+            surfSessionId: sessionId,
+            discoverPublishedAt: null,
+            $or: [
+              { status: 'completed' },
+              { processedKey: { $exists: true, $ne: null } },
+            ],
+          },
+          { $set: { discoverPublishedAt: closedAt } },
+        )
+        .exec();
+    }
 
     void this.runSessionExports(userId, sessionId).catch((err: unknown) => {
       const msg = err instanceof Error ? err.message : String(err);

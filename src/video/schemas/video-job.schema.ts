@@ -45,8 +45,16 @@ export class VideoJob {
 
   @Prop({ type: String })
   errorMessage?: string;
+
+  /** ISO 8601 instant when the video became visible on the discover feed. */
+  @Prop({ type: String, default: null, index: true })
+  discoverPublishedAt: string | null;
 }
 
 export const VideoJobSchema = SchemaFactory.createForClass(VideoJob);
 VideoJobSchema.index({ userId: 1, createdAt: -1 });
 VideoJobSchema.index({ userId: 1, surfSessionId: 1, createdAt: -1 });
+VideoJobSchema.index(
+  { discoverPublishedAt: 1, createdAt: -1 },
+  { partialFilterExpression: { discoverPublishedAt: { $type: 'string' } } },
+);
