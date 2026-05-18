@@ -305,22 +305,61 @@ export class FeedService {
     };
   }
 
-  private async resolveViewerSurfer(
-    doc: {
-      userId: string;
-      claimStatus?: VideoClaimStatus;
-      claimedByUserId?: string | null;
-    },
-    viewerUserId: string,
-  ): Promise<SurferProfileDto | null> {
+  private surferUserIdFromDoc(doc: {
+    userId: string;
+    claimStatus?: VideoClaimStatus;
+    claimedByUserId?: string | null;
+  }): string | null {
     const claimStatus = doc.claimStatus ?? 'none';
-    if (claimStatus === 'auto' && doc.userId === viewerUserId) {
-      return this.buildSurferDto(viewerUserId);
+    if (claimStatus === 'claimed') {
+      const claimedBy = doc.claimedByUserId?.trim();
+      if (claimedBy) return claimedBy;
     }
-    if (claimStatus === 'claimed' && doc.claimedByUserId === viewerUserId) {
-      return this.buildSurferDto(viewerUserId);
+    if (claimStatus === 'auto') {
+      const uploader = doc.userId?.trim();
+      if (uploader) return uploader;
     }
     return null;
+  }
+
+  private async resolveFeedSurfer(doc: {
+    userId: string;
+    claimStatus?: VideoClaimStatus;
+    claimedByUserId?: string | null;
+  }): Promise<SurferProfileDto | null> {
+    const surferId = this.surferUserIdFromDoc(doc);
+    if (!surferId) return null;
+    return this.buildSurferDto(surferId);
+  }
+
+  private async buildDiscoverAuthor(
+    userId: string,
+    uploadSource: 'studio' | 'personal' | undefined,
+    authorProfile: {
+      displayName?: string | null;
+      avatarKey?: string | null;
+    } | null,
+    partnerProfile: {
+      partnerName?: string | null;
+      avatarKey?: string | null;
+    } | null,
+  ): Promise<DiscoverFeedAuthorDto> {
+    const isStudio = uploadSource !== 'personal';
+    const displayName =
+      isStudio && partnerProfile?.partnerName?.trim()
+        ? partnerProfile.partnerName.trim()
+        : authorProfile?.displayName?.trim() || null;
+    const avatarKey =
+      (isStudio
+        ? partnerProfile?.avatarKey?.trim() || authorProfile?.avatarKey?.trim()
+        : authorProfile?.avatarKey?.trim()) || null;
+    const avatarUrl = await this.resolveAvatarUrl(avatarKey);
+    return {
+      userId,
+      displayName,
+      avatarUrl,
+      isPartner: Boolean(partnerProfile),
+    };
   }
 
   private async buildFilmedByDto(userId: string): Promise<FilmedByDto> {
@@ -523,6 +562,25 @@ export class FeedService {
           ),
         },
       },
+      {
+        $addFields: {
+          surferUserId: {
+            $switch: {
+              branches: [
+                {
+                  case: { $eq: ['$claimStatus', 'claimed'] },
+                  then: '$claimedByUserId',
+                },
+                {
+                  case: { $eq: ['$claimStatus', 'auto'] },
+                  then: '$userId',
+                },
+              ],
+              default: null,
+            },
+          },
+        },
+      },
     ];
 
     if (cursor) {
@@ -648,10 +706,6 @@ export class FeedService {
       (isUndisclosedRegionId(session.regionId, countryCode) ? 'Undisclosed' : '');
     const spotName = isUndisclosed ? null : spot?.name?.trim() || null;
 
-    const avatarUrl = await this.resolveAvatarUrl(
-      authorProfile?.avatarKey ?? null,
-    );
-
     let videoUrl: string | null = null;
     let thumbnailUrl: string | null = null;
     if (status === 'completed' && doc.processedKey) {
@@ -662,7 +716,15 @@ export class FeedService {
       }
     }
 
-    const surfer = await this.resolveViewerSurfer(doc, viewerUserId);
+    const [author, surfer] = await Promise.all([
+      this.buildDiscoverAuthor(
+        doc.userId,
+        doc.uploadSource,
+        authorProfile,
+        partnerProfile as { partnerName?: string | null; avatarKey?: string | null } | null,
+      ),
+      this.resolveFeedSurfer(doc),
+    ]);
 
     return {
       jobId: doc.jobId,
@@ -670,12 +732,7 @@ export class FeedService {
       status,
       videoUrl,
       thumbnailUrl,
-      author: {
-        userId: doc.userId,
-        displayName: authorProfile?.displayName ?? null,
-        avatarUrl,
-        isPartner: Boolean(partnerProfile),
-      },
+      author,
       location: {
         countryCode,
         regionName: regionName || 'Unknown',
@@ -712,7 +769,9 @@ export class FeedService {
       : row.spot?.[0]?.name?.trim() || null;
 
     const authorDoc = row.authorProfile?.[0];
-    const avatarUrl = await this.resolveAvatarUrl(authorDoc?.avatarKey ?? null);
+    const partnerDoc = row.partnerProfile?.[0] as
+      | { partnerName?: string | null; avatarKey?: string | null }
+      | undefined;
 
     const processedKey = row.processedKey!;
     const videoUrl = await this.s3.presignedGetUrl(processedKey);
@@ -721,7 +780,15 @@ export class FeedService {
       ? await this.s3.presignedGetUrl(snapKey)
       : null;
 
-    const surfer = await this.resolveViewerSurfer(row, viewerUserId);
+    const [author, surfer] = await Promise.all([
+      this.buildDiscoverAuthor(
+        row.userId,
+        row.uploadSource,
+        authorDoc ?? null,
+        partnerDoc ?? null,
+      ),
+      this.resolveFeedSurfer(row),
+    ]);
 
     return {
       jobId: row.jobId,
@@ -729,12 +796,7 @@ export class FeedService {
       status: this.normalizeStatus(row),
       videoUrl,
       thumbnailUrl,
-      author: {
-        userId: row.userId,
-        displayName: authorDoc?.displayName ?? null,
-        avatarUrl,
-        isPartner: (row.partnerProfile?.length ?? 0) > 0,
-      },
+      author,
       location: {
         countryCode,
         regionName: regionName || 'Unknown',
