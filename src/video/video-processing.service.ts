@@ -228,7 +228,7 @@ export class VideoProcessingService {
       });
 
       const filterComplex =
-        '[1:v][0:v]scale2ref=w=iw*15/100:h=ow/mdar[wm][main];[main][wm]overlay=W-w-24:H-h-24[outv]';
+        '[1:v][0:v]scale2ref=w=iw*15/100:h=ow/mdar[wm][main];[main][wm]overlay=W-w-24:24[outv]';
 
       const vp9Args = [
         '-y',
