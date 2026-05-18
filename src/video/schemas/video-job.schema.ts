@@ -75,6 +75,10 @@ export class VideoJob {
 
   @Prop({ type: String, default: null })
   claimedAt: string | null;
+
+  /** Auth0 subject of the surfer who claimed a partner studio clip. */
+  @Prop({ type: String, default: null, index: true })
+  claimedByUserId: string | null;
 }
 
 export const VideoJobSchema = SchemaFactory.createForClass(VideoJob);
@@ -84,3 +88,4 @@ VideoJobSchema.index(
   { discoverPublishedAt: 1, createdAt: -1 },
   { partialFilterExpression: { discoverPublishedAt: { $type: 'string' } } },
 );
+VideoJobSchema.index({ claimedByUserId: 1, createdAt: -1 });

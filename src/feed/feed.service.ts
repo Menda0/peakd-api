@@ -67,6 +67,24 @@ export interface DiscoverFeedItemDto {
   followedByViewer: boolean;
   claimStatus: VideoClaimStatus;
   uploadSource: 'studio' | 'personal';
+  claimedByViewer: boolean;
+  isOwnUpload: boolean;
+  surfer: SurferProfileDto | null;
+}
+
+export interface SurferProfileDto {
+  userId: string;
+  displayName: string | null;
+  avatarUrl: string | null;
+  surfLevel: string | null;
+  countryCode: string | null;
+  regionName: string | null;
+}
+
+export interface FilmedByDto {
+  userId: string;
+  displayName: string | null;
+  avatarUrl: string | null;
 }
 
 export interface MyVideoItemDto {
@@ -79,6 +97,9 @@ export interface MyVideoItemDto {
   session: DiscoverFeedSessionDto;
   claimStatus: VideoClaimStatus;
   discoverPublishedAt: string | null;
+  uploadSource: 'studio' | 'personal';
+  surfer: SurferProfileDto | null;
+  filmedBy: FilmedByDto | null;
 }
 
 export interface DiscoverFeedPageDto {
@@ -99,6 +120,7 @@ type AggregatedRow = {
   status: VideoJobStatus;
   uploadSource: 'studio' | 'personal';
   claimStatus: VideoClaimStatus;
+  claimedByUserId?: string | null;
   discoverPublishedAt?: string | null;
   session: {
     countryCode: string;
@@ -206,6 +228,124 @@ export class FeedService {
     return { jobId, discoverPublishedAt };
   }
 
+  async claimVideoWave(
+    viewerUserId: string,
+    jobId: string,
+  ): Promise<{
+    jobId: string;
+    claimStatus: VideoClaimStatus;
+    claimedAt: string;
+    surfer: SurferProfileDto;
+  }> {
+    const doc = await this.videoJobModel.findOne({ jobId }).lean().exec();
+    if (!doc) {
+      throw new NotFoundException(`Video job not found: ${jobId}`);
+    }
+    if (doc.uploadSource !== 'studio') {
+      throw new BadRequestException('Only partner studio uploads can be claimed');
+    }
+    if (!this.isCompleted(doc)) {
+      throw new BadRequestException('Only completed videos can be claimed');
+    }
+    if (!doc.discoverPublishedAt) {
+      throw new BadRequestException('Video must be published to discover before claiming');
+    }
+    if (doc.claimStatus === 'claimed') {
+      if (doc.claimedByUserId === viewerUserId) {
+        throw new ConflictException('You have already claimed this wave');
+      }
+      throw new ConflictException('This wave has already been claimed');
+    }
+    if (doc.claimStatus === 'auto') {
+      throw new BadRequestException('Personal uploads are auto-claimed');
+    }
+
+    const claimedAt = new Date().toISOString();
+    await this.videoJobModel
+      .updateOne(
+        { jobId, claimStatus: 'none' },
+        {
+          $set: {
+            claimStatus: 'claimed',
+            claimedAt,
+            claimedByUserId: viewerUserId,
+          },
+        },
+      )
+      .exec();
+
+    const updated = await this.videoJobModel.findOne({ jobId }).lean().exec();
+    if (updated?.claimStatus !== 'claimed') {
+      throw new ConflictException('This wave has already been claimed');
+    }
+
+    const surfer = await this.buildSurferDto(viewerUserId);
+    return { jobId, claimStatus: 'claimed', claimedAt, surfer };
+  }
+
+  private async buildSurferDto(userId: string): Promise<SurferProfileDto> {
+    const profile = await this.userProfileModel.findOne({ userId }).lean().exec();
+    const avatarUrl = await this.resolveAvatarUrl(profile?.avatarKey ?? null);
+    const homeRegionId = profile?.homeRegionId?.trim() || null;
+    let regionName: string | null = null;
+    if (homeRegionId) {
+      const region = await this.regionModel
+        .findOne({ regionId: homeRegionId })
+        .lean()
+        .exec();
+      regionName = region?.name?.trim() || null;
+    }
+    return {
+      userId,
+      displayName: profile?.displayName ?? null,
+      avatarUrl,
+      surfLevel: profile?.surfLevel ?? null,
+      countryCode: profile?.countryCode?.trim().toUpperCase() || null,
+      regionName,
+    };
+  }
+
+  private async resolveViewerSurfer(
+    doc: {
+      userId: string;
+      claimStatus?: VideoClaimStatus;
+      claimedByUserId?: string | null;
+    },
+    viewerUserId: string,
+  ): Promise<SurferProfileDto | null> {
+    const claimStatus = doc.claimStatus ?? 'none';
+    if (claimStatus === 'auto' && doc.userId === viewerUserId) {
+      return this.buildSurferDto(viewerUserId);
+    }
+    if (claimStatus === 'claimed' && doc.claimedByUserId === viewerUserId) {
+      return this.buildSurferDto(viewerUserId);
+    }
+    return null;
+  }
+
+  private async buildFilmedByDto(userId: string): Promise<FilmedByDto> {
+    const [userProfile, partnerProfile] = await Promise.all([
+      this.userProfileModel.findOne({ userId }).lean().exec(),
+      this.partnerProfileModel.findOne({ userId }).lean().exec(),
+    ]);
+    const partner = partnerProfile as {
+      partnerName?: string;
+      avatarKey?: string | null;
+    } | null;
+    const displayName =
+      partner?.partnerName?.trim() ||
+      userProfile?.displayName?.trim() ||
+      null;
+    const avatarKey =
+      partner?.avatarKey?.trim() || userProfile?.avatarKey?.trim() || null;
+    const avatarUrl = await this.resolveAvatarUrl(avatarKey);
+    return {
+      userId,
+      displayName,
+      avatarUrl,
+    };
+  }
+
   private async listViewerProcessingPersonal(
     viewerUserId: string,
   ): Promise<DiscoverFeedItemDto[]> {
@@ -221,24 +361,56 @@ export class FeedService {
 
     const items: DiscoverFeedItemDto[] = [];
     for (const doc of rows) {
-      items.push(await this.docToDiscoverDto(doc, 'processing'));
+      items.push(await this.docToDiscoverDto(doc, 'processing', viewerUserId));
     }
     return items;
   }
 
   async listMyVideos(userId: string): Promise<MyVideoItemDto[]> {
-    const rows = await this.videoJobModel
-      .find({ userId, uploadSource: 'personal' })
-      .sort({ createdAt: -1 })
-      .lean()
-      .exec();
+    const [personalRows, claimedRows] = await Promise.all([
+      this.videoJobModel
+        .find({ userId, uploadSource: 'personal' })
+        .sort({ createdAt: -1 })
+        .lean()
+        .exec(),
+      this.videoJobModel
+        .find({ claimedByUserId: userId, claimStatus: 'claimed' })
+        .sort({ createdAt: -1 })
+        .lean()
+        .exec(),
+    ]);
+
+    const surfer = await this.buildSurferDto(userId);
+    const byJobId = new Map<string, (typeof personalRows)[number]>();
+    for (const doc of personalRows) {
+      byJobId.set(doc.jobId, doc);
+    }
+    for (const doc of claimedRows) {
+      byJobId.set(doc.jobId, doc);
+    }
+
+    const sorted = [...byJobId.values()].sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+    );
 
     const items: MyVideoItemDto[] = [];
-    for (const doc of rows) {
+    for (const doc of sorted) {
       const dto = await this.docToDiscoverDto(
         doc,
         this.normalizeStatus(doc),
+        userId,
       );
+      const isViewerSurfer =
+        (doc.uploadSource === 'personal' && doc.claimStatus === 'auto') ||
+        (doc.uploadSource === 'studio' &&
+          doc.claimStatus === 'claimed' &&
+          doc.claimedByUserId === userId);
+      const filmedBy =
+        doc.uploadSource === 'studio' &&
+        doc.claimStatus === 'claimed' &&
+        doc.userId !== userId
+          ? await this.buildFilmedByDto(doc.userId)
+          : null;
       items.push({
         jobId: dto.jobId,
         createdAt: dto.createdAt,
@@ -249,6 +421,9 @@ export class FeedService {
         session: dto.session,
         claimStatus: dto.claimStatus,
         discoverPublishedAt: doc.discoverPublishedAt ?? null,
+        uploadSource: doc.uploadSource === 'personal' ? 'personal' : 'studio',
+        surfer: isViewerSurfer ? surfer : null,
+        filmedBy,
       });
     }
     return items;
@@ -370,7 +545,7 @@ export class FeedService {
 
     const items: DiscoverFeedItemDto[] = [...pending];
     for (const row of pageRows) {
-      items.push(await this.rowToDto(row));
+      items.push(await this.rowToDto(row, viewerUserId));
     }
 
     let nextCursor: string | null = null;
@@ -441,8 +616,10 @@ export class FeedService {
       status?: VideoJobStatus;
       uploadSource?: 'studio' | 'personal';
       claimStatus?: VideoClaimStatus;
+      claimedByUserId?: string | null;
     },
     status: VideoJobStatus,
+    viewerUserId: string,
   ): Promise<DiscoverFeedItemDto> {
     const sessionId = doc.surfSessionId?.trim();
     if (!sessionId) {
@@ -485,6 +662,8 @@ export class FeedService {
       }
     }
 
+    const surfer = await this.resolveViewerSurfer(doc, viewerUserId);
+
     return {
       jobId: doc.jobId,
       createdAt: doc.createdAt,
@@ -508,10 +687,16 @@ export class FeedService {
       followedByViewer: false,
       claimStatus: doc.claimStatus ?? 'none',
       uploadSource: doc.uploadSource === 'personal' ? 'personal' : 'studio',
+      claimedByViewer: doc.claimedByUserId === viewerUserId,
+      isOwnUpload: doc.userId === viewerUserId,
+      surfer,
     };
   }
 
-  private async rowToDto(row: AggregatedRow): Promise<DiscoverFeedItemDto> {
+  private async rowToDto(
+    row: AggregatedRow,
+    viewerUserId: string,
+  ): Promise<DiscoverFeedItemDto> {
     const session = row.session;
     const countryCode = session.countryCode;
     const isUndisclosed =
@@ -536,6 +721,8 @@ export class FeedService {
       ? await this.s3.presignedGetUrl(snapKey)
       : null;
 
+    const surfer = await this.resolveViewerSurfer(row, viewerUserId);
+
     return {
       jobId: row.jobId,
       createdAt: row.createdAt,
@@ -559,6 +746,9 @@ export class FeedService {
       followedByViewer: false,
       claimStatus: row.claimStatus ?? 'none',
       uploadSource: row.uploadSource === 'personal' ? 'personal' : 'studio',
+      claimedByViewer: row.claimedByUserId === viewerUserId,
+      isOwnUpload: row.userId === viewerUserId,
+      surfer,
     };
   }
 }

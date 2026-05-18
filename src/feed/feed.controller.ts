@@ -39,4 +39,10 @@ export class FeedController {
   ) {
     return this.feed.publishVideoToDiscover(userId, jobId);
   }
+
+  @Post('discover/videos/:jobId/claim')
+  @HttpCode(HttpStatus.OK)
+  claimVideo(@AuthUserId() userId: string, @Param('jobId') jobId: string) {
+    return this.feed.claimVideoWave(userId, jobId);
+  }
 }
