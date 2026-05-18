@@ -46,6 +46,10 @@ export class SurfSession {
   @Prop({ type: String, enum: ['open', 'closed'], default: 'open' })
   status: 'open' | 'closed';
 
+  /** Partner studio folders vs personal feed uploads (hidden from studio UI). */
+  @Prop({ type: String, enum: ['studio', 'personal'], default: 'studio', index: true })
+  sessionKind: 'studio' | 'personal';
+
   @Prop({ type: String, default: null })
   closedAt: string | null;
 

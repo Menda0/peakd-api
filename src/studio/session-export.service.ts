@@ -120,6 +120,7 @@ export class SessionExportService {
           {
             userId,
             surfSessionId: sessionId,
+            uploadSource: { $ne: 'personal' },
             discoverPublishedAt: null,
             $or: [
               { status: 'completed' },

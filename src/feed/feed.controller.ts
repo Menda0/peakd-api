@@ -26,6 +26,11 @@ export class FeedController {
     return this.feed.listDiscoverFeed(userId, { limit, cursor });
   }
 
+  @Get('feed/my-videos')
+  listMyVideos(@AuthUserId() userId: string) {
+    return this.feed.listMyVideos(userId);
+  }
+
   @Post('discover/videos/:jobId/publish')
   @HttpCode(HttpStatus.OK)
   publishVideo(

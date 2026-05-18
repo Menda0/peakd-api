@@ -12,11 +12,17 @@ import {
   isUndisclosedRegionId,
   isUndisclosedSpotId,
 } from '../studio/geo-undisclosed';
+import { Region } from '../studio/schemas/region.schema';
+import { Spot } from '../studio/schemas/spot.schema';
 import { SurfSession } from '../studio/schemas/surf-session.schema';
+import { PartnerProfile } from '../partner/schemas/partner-profile.schema';
 import { UserProfile } from '../users/schemas/user-profile.schema';
 import { VideoJob } from '../video/schemas/video-job.schema';
+import type { VideoJobStatus } from '../video/schemas/video-job.schema';
+import type { VideoClaimStatus } from '../video/schemas/video-job.schema';
 import {
   buildCursorMatchFilter,
+  buildFeedSortTierExpression,
   buildRelevanceTierExpression,
   decodeDiscoverCursor,
   encodeDiscoverCursor,
@@ -43,13 +49,28 @@ export interface DiscoverFeedLocationDto {
 export interface DiscoverFeedItemDto {
   jobId: string;
   createdAt: string;
-  videoUrl: string;
+  status: VideoJobStatus;
+  videoUrl: string | null;
   thumbnailUrl: string | null;
   title: string;
   author: DiscoverFeedAuthorDto;
   location: DiscoverFeedLocationDto;
   shakaCount: number;
   followedByViewer: boolean;
+  claimStatus: VideoClaimStatus;
+  uploadSource: 'studio' | 'personal';
+}
+
+export interface MyVideoItemDto {
+  jobId: string;
+  createdAt: string;
+  status: VideoJobStatus;
+  title: string;
+  thumbnailUrl: string | null;
+  videoUrl: string | null;
+  location: DiscoverFeedLocationDto;
+  claimStatus: VideoClaimStatus;
+  discoverPublishedAt: string | null;
 }
 
 export interface DiscoverFeedPageDto {
@@ -66,6 +87,11 @@ type AggregatedRow = {
   processedKey?: string;
   snapshotKeys?: string[];
   relevanceTier: number;
+  feedSortTier: number;
+  status: VideoJobStatus;
+  uploadSource: 'studio' | 'personal';
+  claimStatus: VideoClaimStatus;
+  discoverPublishedAt?: string | null;
   session: {
     countryCode: string;
     regionId: string;
@@ -89,6 +115,12 @@ export class FeedService {
     private readonly surfSessionModel: Model<SurfSession>,
     @InjectModel(UserProfile.name)
     private readonly userProfileModel: Model<UserProfile>,
+    @InjectModel(PartnerProfile.name)
+    private readonly partnerProfileModel: Model<PartnerProfile>,
+    @InjectModel(Region.name)
+    private readonly regionModel: Model<Region>,
+    @InjectModel(Spot.name)
+    private readonly spotModel: Model<Spot>,
     private readonly s3: S3Service,
     private readonly config: ConfigService,
   ) {}
@@ -128,6 +160,11 @@ export class FeedService {
     if (!this.isCompleted(doc)) {
       throw new BadRequestException('Only completed videos can be published to discover');
     }
+    if (doc.uploadSource === 'personal') {
+      throw new BadRequestException(
+        'Personal uploads are published automatically when processing completes',
+      );
+    }
     if (doc.discoverPublishedAt) {
       throw new ConflictException('Video is already published to discover');
     }
@@ -156,6 +193,54 @@ export class FeedService {
     return { jobId, discoverPublishedAt };
   }
 
+  private async listViewerProcessingPersonal(
+    viewerUserId: string,
+  ): Promise<DiscoverFeedItemDto[]> {
+    const rows = await this.videoJobModel
+      .find({
+        userId: viewerUserId,
+        uploadSource: 'personal',
+        status: 'processing',
+      })
+      .sort({ createdAt: -1 })
+      .lean()
+      .exec();
+
+    const items: DiscoverFeedItemDto[] = [];
+    for (const doc of rows) {
+      items.push(await this.docToDiscoverDto(doc, 'processing'));
+    }
+    return items;
+  }
+
+  async listMyVideos(userId: string): Promise<MyVideoItemDto[]> {
+    const rows = await this.videoJobModel
+      .find({ userId, uploadSource: 'personal' })
+      .sort({ createdAt: -1 })
+      .lean()
+      .exec();
+
+    const items: MyVideoItemDto[] = [];
+    for (const doc of rows) {
+      const dto = await this.docToDiscoverDto(
+        doc,
+        this.normalizeStatus(doc),
+      );
+      items.push({
+        jobId: dto.jobId,
+        createdAt: dto.createdAt,
+        status: dto.status,
+        title: dto.title,
+        thumbnailUrl: dto.thumbnailUrl,
+        videoUrl: dto.videoUrl,
+        location: dto.location,
+        claimStatus: dto.claimStatus,
+        discoverPublishedAt: doc.discoverPublishedAt ?? null,
+      });
+    }
+    return items;
+  }
+
   async listDiscoverFeed(
     viewerUserId: string,
     options: { limit?: string; cursor?: string },
@@ -178,6 +263,11 @@ export class FeedService {
     const viewerCountryCode =
       profile?.countryCode?.trim().toUpperCase() || null;
     const viewerHomeRegionId = profile?.homeRegionId?.trim() || null;
+
+    const pending =
+      cursor === null
+        ? await this.listViewerProcessingPersonal(viewerUserId)
+        : [];
 
     const pipeline: PipelineStage[] = [
       {
@@ -237,6 +327,14 @@ export class FeedService {
           ),
         },
       },
+      {
+        $addFields: {
+          feedSortTier: buildFeedSortTierExpression(
+            viewerUserId,
+            '$relevanceTier',
+          ),
+        },
+      },
     ];
 
     if (cursor) {
@@ -246,7 +344,7 @@ export class FeedService {
     }
 
     pipeline.push(
-      { $sort: { relevanceTier: 1, createdAt: -1, jobId: -1 } },
+      { $sort: { feedSortTier: 1, createdAt: -1, jobId: -1 } },
       { $limit: limit + 1 },
     );
 
@@ -257,7 +355,7 @@ export class FeedService {
     const hasMore = rows.length > limit;
     const pageRows = hasMore ? rows.slice(0, limit) : rows;
 
-    const items: DiscoverFeedItemDto[] = [];
+    const items: DiscoverFeedItemDto[] = [...pending];
     for (const row of pageRows) {
       items.push(await this.rowToDto(row));
     }
@@ -266,13 +364,108 @@ export class FeedService {
     if (hasMore && pageRows.length > 0) {
       const last = pageRows[pageRows.length - 1]!;
       nextCursor = encodeDiscoverCursor({
-        tier: last.relevanceTier,
+        tier: last.feedSortTier,
         createdAt: last.createdAt,
         jobId: last.jobId,
       });
     }
 
     return { items, nextCursor, hasMore };
+  }
+
+  private normalizeStatus(doc: {
+    status?: VideoJobStatus;
+    processedKey?: string | null;
+  }): VideoJobStatus {
+    if (doc.status === 'failed' || doc.status === 'processing') {
+      return doc.status;
+    }
+    if (doc.status === 'completed' || doc.processedKey?.trim()) {
+      return 'completed';
+    }
+    return 'processing';
+  }
+
+  private async docToDiscoverDto(
+    doc: {
+      jobId: string;
+      userId: string;
+      originalFilename: string;
+      createdAt: string;
+      processedKey?: string;
+      snapshotKeys?: string[];
+      surfSessionId?: string | null;
+      status?: VideoJobStatus;
+      uploadSource?: 'studio' | 'personal';
+      claimStatus?: VideoClaimStatus;
+    },
+    status: VideoJobStatus,
+  ): Promise<DiscoverFeedItemDto> {
+    const sessionId = doc.surfSessionId?.trim();
+    if (!sessionId) {
+      throw new Error('Video missing surf session');
+    }
+    const session = await this.surfSessionModel
+      .findOne({ sessionId })
+      .lean()
+      .exec();
+    if (!session) {
+      throw new Error('Surf session not found');
+    }
+    const [authorProfile, partnerProfile, region, spot] = await Promise.all([
+      this.userProfileModel.findOne({ userId: doc.userId }).lean().exec(),
+      this.partnerProfileModel.findOne({ userId: doc.userId }).lean().exec(),
+      this.regionModel.findOne({ regionId: session.regionId }).lean().exec(),
+      this.spotModel.findOne({ spotId: session.spotId }).lean().exec(),
+    ]);
+
+    const countryCode = session.countryCode;
+    const isUndisclosed =
+      isUndisclosedRegionId(session.regionId, countryCode) ||
+      isUndisclosedSpotId(session.spotId, countryCode);
+    const regionName =
+      region?.name?.trim() ||
+      (isUndisclosedRegionId(session.regionId, countryCode) ? 'Undisclosed' : '');
+    const spotName = isUndisclosed ? null : spot?.name?.trim() || null;
+
+    const avatarUrl = await this.resolveAvatarUrl(
+      authorProfile?.avatarKey ?? null,
+    );
+
+    let videoUrl: string | null = null;
+    let thumbnailUrl: string | null = null;
+    if (status === 'completed' && doc.processedKey) {
+      videoUrl = await this.s3.presignedGetUrl(doc.processedKey);
+      const snapKey = doc.snapshotKeys?.[0];
+      if (snapKey) {
+        thumbnailUrl = await this.s3.presignedGetUrl(snapKey);
+      }
+    }
+
+    return {
+      jobId: doc.jobId,
+      createdAt: doc.createdAt,
+      status,
+      videoUrl,
+      thumbnailUrl,
+      title: doc.originalFilename?.replace(/\.[^.]+$/, '') || 'Surf video',
+      author: {
+        userId: doc.userId,
+        displayName: authorProfile?.displayName ?? null,
+        avatarUrl,
+        isPartner: Boolean(partnerProfile),
+      },
+      location: {
+        countryCode,
+        regionName: regionName || 'Unknown',
+        spotName,
+        isUndisclosed,
+      },
+      shakaCount: 0,
+      followedByViewer: false,
+      claimStatus: doc.claimStatus ?? 'none',
+      uploadSource: doc.uploadSource === 'personal' ? 'personal' : 'studio',
+    };
   }
 
   private async rowToDto(row: AggregatedRow): Promise<DiscoverFeedItemDto> {
@@ -303,6 +496,7 @@ export class FeedService {
     return {
       jobId: row.jobId,
       createdAt: row.createdAt,
+      status: this.normalizeStatus(row),
       videoUrl,
       thumbnailUrl,
       title: row.originalFilename?.replace(/\.[^.]+$/, '') || 'Surf video',
@@ -320,6 +514,8 @@ export class FeedService {
       },
       shakaCount: 0,
       followedByViewer: false,
+      claimStatus: row.claimStatus ?? 'none',
+      uploadSource: row.uploadSource === 'personal' ? 'personal' : 'studio',
     };
   }
 }

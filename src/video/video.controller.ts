@@ -56,6 +56,16 @@ export class VideoController {
         ? req.body.surfSessionId.trim()
         : '';
     const surfSessionId = raw === '' ? null : raw;
-    return this.videoProcessing.processUploadedFile(file, userId, surfSessionId);
+    const sourceRaw =
+      typeof req.body?.uploadSource === 'string'
+        ? req.body.uploadSource.trim()
+        : 'studio';
+    const uploadSource = sourceRaw === 'personal' ? 'personal' : 'studio';
+    return this.videoProcessing.processUploadedFile(
+      file,
+      userId,
+      surfSessionId,
+      uploadSource,
+    );
   }
 }

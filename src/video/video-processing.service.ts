@@ -18,7 +18,10 @@ import { ffprobeJson, runFfmpeg } from '../ffmpeg/ffmpeg.helper';
 import { planSnapshotTimes } from './snapshot-planner';
 import { S3Service } from '../s3/s3.service';
 import type { VideoJobMeta } from './video-job-meta';
-import { VideoJob } from './schemas/video-job.schema';
+import {
+  VideoJob,
+  type VideoUploadSource,
+} from './schemas/video-job.schema';
 import { StudioService } from '../studio/studio.service';
 
 export interface StartVideoJobResult {
@@ -74,13 +77,23 @@ export class VideoProcessingService {
     file: Express.Multer.File,
     userId: string,
     surfSessionId: string | null = null,
+    uploadSource: VideoUploadSource = 'studio',
   ): Promise<StartVideoJobResult> {
     if (surfSessionId) {
       if (!uuidValidate(surfSessionId) || uuidVersion(surfSessionId) !== 4) {
         throw new BadRequestException('Invalid surfSessionId');
       }
       await this.studio.assertSessionOwnedByUser(userId, surfSessionId);
-      await this.studio.assertSessionOpenForUpload(userId, surfSessionId);
+      if (uploadSource !== 'personal') {
+        await this.studio.assertSessionOpenForUpload(userId, surfSessionId);
+      } else {
+        const session = await this.studio.getSession(userId, surfSessionId);
+        if (session.sessionKind !== 'personal') {
+          throw new BadRequestException(
+            'Personal uploads must use a personal session',
+          );
+        }
+      }
     }
 
     const videoCfg = this.config.getOrThrow<VideoConfigValues>(VIDEO_CONFIG);
@@ -113,6 +126,7 @@ export class VideoProcessingService {
     const inputPath = file.path;
     const workDir = join(inputPath, '..');
 
+    const isPersonal = uploadSource === 'personal';
     await this.videoJobModel.create({
       userId,
       jobId,
@@ -122,6 +136,10 @@ export class VideoProcessingService {
       status: 'processing',
       snapshotKeys: [],
       rawOriginalKey: null,
+      uploadSource,
+      discoverPublishedAt: isPersonal ? createdAt : null,
+      claimStatus: isPersonal ? 'auto' : 'none',
+      claimedAt: isPersonal ? createdAt : null,
     });
 
     const ctx: JobPipelineContext = {
@@ -311,6 +329,15 @@ export class VideoProcessingService {
       };
       await this.s3.putJson(`${prefix}/meta.json`, meta);
 
+      const existing = await this.videoJobModel.findOne({ jobId }).lean().exec();
+      const publishPatch =
+        existing?.uploadSource === 'personal'
+          ? {
+              discoverPublishedAt:
+                existing.discoverPublishedAt ?? createdAt,
+            }
+          : {};
+
       await this.videoJobModel.updateOne(
         { jobId },
         {
@@ -318,6 +345,7 @@ export class VideoProcessingService {
             processedKey,
             snapshotKeys,
             status: 'completed',
+            ...publishPatch,
           },
           $unset: { errorMessage: 1 },
         },

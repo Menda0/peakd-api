@@ -66,16 +66,35 @@ export function buildCursorMatchFilter(
 ): Record<string, unknown> {
   return {
     $or: [
-      { relevanceTier: { $gt: cursor.tier } },
+      { feedSortTier: { $gt: cursor.tier } },
       {
-        relevanceTier: cursor.tier,
+        feedSortTier: cursor.tier,
         createdAt: { $lt: cursor.createdAt },
       },
       {
-        relevanceTier: cursor.tier,
+        feedSortTier: cursor.tier,
         createdAt: cursor.createdAt,
         jobId: { $lt: cursor.jobId },
       },
+    ],
+  };
+}
+
+/** Viewer’s own personal uploads sort before geo-ranked discover items. */
+export function buildFeedSortTierExpression(
+  viewerUserId: string,
+  baseRelevanceExpression: Record<string, unknown> | string,
+): Record<string, unknown> {
+  return {
+    $cond: [
+      {
+        $and: [
+          { $eq: ['$userId', viewerUserId] },
+          { $eq: ['$uploadSource', 'personal'] },
+        ],
+      },
+      -1,
+      baseRelevanceExpression,
     ],
   };
 }

@@ -85,6 +85,7 @@ export class StudioController {
       durationMinutes?: number | string;
       conditionsRating?: number | string | null;
       waveTypes?: unknown;
+      sessionKind?: 'studio' | 'personal';
     },
   ) {
     return this.studio.createSession(userId, body);

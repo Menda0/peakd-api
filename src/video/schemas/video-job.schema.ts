@@ -6,6 +6,12 @@ export type VideoJobDocument = HydratedDocument<VideoJob>;
 export const VIDEO_JOB_STATUSES = ['processing', 'completed', 'failed'] as const;
 export type VideoJobStatus = (typeof VIDEO_JOB_STATUSES)[number];
 
+export const VIDEO_UPLOAD_SOURCES = ['studio', 'personal'] as const;
+export type VideoUploadSource = (typeof VIDEO_UPLOAD_SOURCES)[number];
+
+export const VIDEO_CLAIM_STATUSES = ['none', 'auto', 'claimed'] as const;
+export type VideoClaimStatus = (typeof VIDEO_CLAIM_STATUSES)[number];
+
 @Schema({ collection: 'video_jobs' })
 export class VideoJob {
   @Prop({ required: true, index: true })
@@ -49,6 +55,26 @@ export class VideoJob {
   /** ISO 8601 instant when the video became visible on the discover feed. */
   @Prop({ type: String, default: null, index: true })
   discoverPublishedAt: string | null;
+
+  /** Partner studio vs personal user upload from the feed. */
+  @Prop({
+    type: String,
+    enum: VIDEO_UPLOAD_SOURCES,
+    default: 'studio',
+    index: true,
+  })
+  uploadSource: VideoUploadSource;
+
+  /** Surf claim state (auto for personal uploads). */
+  @Prop({
+    type: String,
+    enum: VIDEO_CLAIM_STATUSES,
+    default: 'none',
+  })
+  claimStatus: VideoClaimStatus;
+
+  @Prop({ type: String, default: null })
+  claimedAt: string | null;
 }
 
 export const VideoJobSchema = SchemaFactory.createForClass(VideoJob);

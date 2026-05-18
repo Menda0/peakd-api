@@ -53,6 +53,7 @@ export type SurfSessionExportStatus =
 
 export type SurfSessionListItemDto = {
   sessionId: string;
+  sessionKind: 'studio' | 'personal';
   countryCode: string;
   regionId: string;
   spotId: string;
@@ -244,12 +245,14 @@ export class StudioService {
     rawExportStatus?: string;
     rawExportErrorMessage?: string | null;
     rawExportExpiresAt?: string | null;
+    sessionKind?: string;
   }): Omit<
     SurfSessionListItemDto,
     'spotName' | 'regionName' | 'videoCount' | 'previewThumbnailUrls'
   > {
     return {
       sessionId: d.sessionId,
+      sessionKind: d.sessionKind === 'personal' ? 'personal' : 'studio',
       countryCode: d.countryCode,
       regionId: d.regionId,
       spotId: d.spotId,
@@ -578,7 +581,7 @@ export class StudioService {
 
   async listSessions(userId: string): Promise<SurfSessionListItemDto[]> {
     const docs = await this.surfSessionModel
-      .find({ userId })
+      .find({ userId, sessionKind: { $ne: 'personal' } })
       .sort({ createdAt: -1 })
       .lean()
       .exec();
@@ -644,15 +647,19 @@ export class StudioService {
       durationMinutes?: number | string;
       conditionsRating?: number | string | null;
       waveTypes?: unknown;
+      sessionKind?: 'studio' | 'personal';
     },
   ): Promise<SurfSessionDetailDto> {
     const payload = await this.resolveSessionPayload(userId, body);
+    const sessionKind =
+      body.sessionKind === 'personal' ? 'personal' : 'studio';
     const sessionId = uuidv4();
     const createdAt = new Date().toISOString();
     await this.surfSessionModel.create({
       sessionId,
       userId,
       ...payload,
+      sessionKind,
       createdAt,
     });
     return this.getSession(userId, sessionId);
