@@ -13,6 +13,14 @@ import { SurfSession } from './schemas/surf-session.schema';
 import { VideoJob } from '../video/schemas/video-job.schema';
 import { S3Service } from '../s3/s3.service';
 import { WAVE_TYPE_ID_SET } from './studio.constants';
+import {
+  UNDISCLOSED_DISPLAY_NAME,
+  UNDISCLOSED_SYSTEM_USER_ID,
+  isUndisclosedRegionId,
+  isUndisclosedSpotId,
+  undisclosedRegionId,
+  undisclosedSpotId,
+} from './geo-undisclosed';
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const COUNTRY_CODE = /^[A-Z]{2}$/;
@@ -128,6 +136,65 @@ export class StudioService {
       spot.createdByUserId === userId ||
       StudioService.isVerifiedValue(spot.verified)
     );
+  }
+
+  private async ensureUndisclosedGeo(countryCode: string): Promise<void> {
+    const cc = normalizeCountryCode(countryCode);
+    const regionId = undisclosedRegionId(cc);
+    const spotId = undisclosedSpotId(cc);
+    const now = new Date().toISOString();
+    await this.regionModel.updateOne(
+      { regionId },
+      {
+        $setOnInsert: {
+          regionId,
+          countryCode: cc,
+          name: UNDISCLOSED_DISPLAY_NAME,
+          verified: true,
+          disabled: false,
+          verifiedAt: now,
+          verifierCount: 0,
+          createdByUserId: UNDISCLOSED_SYSTEM_USER_ID,
+          createdAt: now,
+        },
+      },
+      { upsert: true },
+    );
+    await this.spotModel.updateOne(
+      { spotId },
+      {
+        $setOnInsert: {
+          spotId,
+          regionId,
+          name: UNDISCLOSED_DISPLAY_NAME,
+          level: null,
+          breakType: null,
+          consistency: null,
+          verified: true,
+          disabled: false,
+          verifiedAt: now,
+          verifierCount: 0,
+          createdByUserId: UNDISCLOSED_SYSTEM_USER_ID,
+          createdAt: now,
+        },
+      },
+      { upsert: true },
+    );
+  }
+
+  private prependUndisclosedRegion(
+    items: RegionListItemDto[],
+    countryCode: string,
+  ): RegionListItemDto[] {
+    const id = undisclosedRegionId(countryCode);
+    const undisclosed: RegionListItemDto = {
+      regionId: id,
+      countryCode,
+      name: UNDISCLOSED_DISPLAY_NAME,
+      verified: false,
+    };
+    const rest = items.filter((r) => r.regionId !== id);
+    return [undisclosed, ...rest];
   }
 
   private normalizeWaveTypes(raw: unknown): string[] {
@@ -297,17 +364,19 @@ export class StudioService {
           ...StudioService.verifiedTrue,
         }
       : this.regionVisibleQuery(userId, countryCode);
+    await this.ensureUndisclosedGeo(countryCode);
     const docs = await this.regionModel
       .find(query)
       .sort({ verified: -1, name: 1 })
       .lean()
       .exec();
-    return docs.map((d) => ({
+    const items = docs.map((d) => ({
       regionId: d.regionId,
       countryCode: d.countryCode,
       name: d.name,
       verified: Boolean(d.verified),
     }));
+    return this.prependUndisclosedRegion(items, countryCode);
   }
 
   async createRegion(
@@ -363,6 +432,18 @@ export class StudioService {
     if (!this.isRegionVisibleToUser(userId, region)) {
       throw new ForbiddenException('Region not accessible');
     }
+    if (isUndisclosedRegionId(region.regionId, region.countryCode)) {
+      await this.ensureUndisclosedGeo(region.countryCode);
+      const spotId = undisclosedSpotId(region.countryCode);
+      return [
+        {
+          spotId,
+          regionId: region.regionId,
+          name: UNDISCLOSED_DISPLAY_NAME,
+          verified: false,
+        },
+      ];
+    }
     const query = verifiedOnly
       ? {
           regionId: region.regionId,
@@ -405,6 +486,11 @@ export class StudioService {
     }
     if (!this.isRegionVisibleToUser(userId, region)) {
       throw new ForbiddenException('Region not accessible');
+    }
+    if (isUndisclosedRegionId(regionId, region.countryCode)) {
+      throw new BadRequestException(
+        'Cannot create spots on undisclosed region',
+      );
     }
     const spotId = uuidv4();
     const createdAt = new Date().toISOString();
@@ -692,6 +778,26 @@ export class StudioService {
     }
 
     const waveTypes = this.normalizeWaveTypes(body.waveTypes);
+
+    await this.ensureUndisclosedGeo(countryCode);
+
+    if (isUndisclosedRegionId(regionId, countryCode)) {
+      if (!isUndisclosedSpotId(spotId, countryCode)) {
+        throw new BadRequestException(
+          'Undisclosed region requires undisclosed spot',
+        );
+      }
+      return {
+        countryCode,
+        regionId,
+        spotId,
+        sessionDate,
+        sessionTime: sessionTimeRaw,
+        durationMinutes,
+        conditionsRating,
+        waveTypes,
+      };
+    }
 
     const region = await this.regionModel
       .findOne({ regionId })
