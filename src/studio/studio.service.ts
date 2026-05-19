@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
+import { randomUUID } from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { Region } from './schemas/region.schema';
 import { Spot } from './schemas/spot.schema';
@@ -70,6 +71,7 @@ export type SurfSessionListItemDto = {
   rawExportStatus: SurfSessionExportStatus;
   rawExportErrorMessage: string | null;
   rawExportExpiresAt: string | null;
+  shareToken: string | null;
   spotName?: string;
   regionName?: string;
   videoCount: number;
@@ -77,6 +79,10 @@ export type SurfSessionListItemDto = {
 };
 
 export type SurfSessionDetailDto = SurfSessionListItemDto;
+
+export type SessionShareDto = {
+  shareToken: string;
+};
 
 @Injectable()
 export class StudioService {
@@ -246,6 +252,7 @@ export class StudioService {
     rawExportErrorMessage?: string | null;
     rawExportExpiresAt?: string | null;
     sessionKind?: string;
+    shareToken?: string | null;
   }): Omit<
     SurfSessionListItemDto,
     'spotName' | 'regionName' | 'videoCount' | 'previewThumbnailUrls'
@@ -297,7 +304,69 @@ export class StudioService {
         d.rawExportExpiresAt.trim()
           ? d.rawExportExpiresAt
           : null,
+      shareToken:
+        typeof d.shareToken === 'string' && d.shareToken.trim()
+          ? d.shareToken.trim()
+          : null,
     };
+  }
+
+  private async countCompletedSessionVideos(
+    userId: string,
+    sessionId: string,
+  ): Promise<number> {
+    return this.videoJobModel
+      .countDocuments({
+        userId,
+        surfSessionId: sessionId,
+        status: 'completed',
+        processedKey: { $exists: true, $ne: null },
+      })
+      .exec();
+  }
+
+  async ensureSessionShareToken(
+    userId: string,
+    sessionId: string,
+  ): Promise<SessionShareDto> {
+    const session = await this.surfSessionModel
+      .findOne({ sessionId, userId })
+      .lean()
+      .exec();
+    if (!session) {
+      throw new NotFoundException('Session not found');
+    }
+    if (session.sessionKind === 'personal') {
+      throw new BadRequestException('Personal sessions cannot be shared');
+    }
+    if (session.status !== 'closed') {
+      throw new BadRequestException(
+        'Close the session before sharing',
+      );
+    }
+    const completedCount = await this.countCompletedSessionVideos(
+      userId,
+      sessionId,
+    );
+    if (completedCount < 1) {
+      throw new BadRequestException(
+        'At least one completed wave is required to share',
+      );
+    }
+
+    let shareToken =
+      typeof session.shareToken === 'string' && session.shareToken.trim()
+        ? session.shareToken.trim()
+        : null;
+
+    if (!shareToken) {
+      shareToken = randomUUID();
+      await this.surfSessionModel
+        .updateOne({ sessionId, userId }, { $set: { shareToken } })
+        .exec();
+    }
+
+    return { shareToken };
   }
 
   private normalizeExportStatus(raw: unknown): SurfSessionExportStatus {

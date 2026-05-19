@@ -82,6 +82,10 @@ export class SurfSession {
   /** ISO instant after which raw ZIP download is refused (UI retention hint). */
   @Prop({ type: String, default: null })
   rawExportExpiresAt: string | null;
+
+  /** Unguessable token for public session viewer (anyone with link). */
+  @Prop({ type: String, default: null, sparse: true, unique: true, index: true })
+  shareToken: string | null;
 }
 
 export const SurfSessionSchema = SchemaFactory.createForClass(SurfSession);

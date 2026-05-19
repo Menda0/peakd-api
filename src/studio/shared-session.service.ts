@@ -1,0 +1,184 @@
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { PartnerProfile } from '../partner/schemas/partner-profile.schema';
+import { S3Service } from '../s3/s3.service';
+import { VideoJob } from '../video/schemas/video-job.schema';
+import {
+  isUndisclosedRegionId,
+  isUndisclosedSpotId,
+} from './geo-undisclosed';
+import { Region } from './schemas/region.schema';
+import { Spot } from './schemas/spot.schema';
+import { SurfSession } from './schemas/surf-session.schema';
+import { WAVE_TYPE_ID_SET } from './studio.constants';
+
+const LIST_THUMBNAIL_MAX = 4;
+const SESSION_TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+export type PublicSharedSessionWaveDto = {
+  jobId: string;
+  originalFilename: string;
+  createdAt: string;
+  thumbnailUrls: string[];
+  videoUrl: string;
+};
+
+export type PublicSharedSessionDto = {
+  partnerName: string | null;
+  partnerAvatarUrl: string | null;
+  session: {
+    sessionDate: string;
+    sessionTime: string;
+    durationMinutes: number;
+    conditionsRating: number | null;
+    waveTypes: string[];
+    countryCode: string;
+    regionName: string;
+    spotName: string | null;
+    isUndisclosed: boolean;
+  };
+  waves: PublicSharedSessionWaveDto[];
+};
+
+@Injectable()
+export class SharedSessionService {
+  constructor(
+    private readonly config: ConfigService,
+    private readonly s3: S3Service,
+    @InjectModel(SurfSession.name)
+    private readonly surfSessionModel: Model<SurfSession>,
+    @InjectModel(VideoJob.name)
+    private readonly videoJobModel: Model<VideoJob>,
+    @InjectModel(Region.name)
+    private readonly regionModel: Model<Region>,
+    @InjectModel(Spot.name)
+    private readonly spotModel: Model<Spot>,
+    @InjectModel(PartnerProfile.name)
+    private readonly partnerProfileModel: Model<PartnerProfile>,
+  ) {}
+
+  private normalizeWaveTypes(raw: unknown): string[] {
+    if (!Array.isArray(raw)) return [];
+    return raw.filter(
+      (w): w is string =>
+        typeof w === 'string' && WAVE_TYPE_ID_SET.has(w as never),
+    );
+  }
+
+  private async resolveAvatarUrl(
+    avatarKey: string | null,
+  ): Promise<string | null> {
+    if (!avatarKey) return null;
+    const publicBase = this.config.get<string>('S3_PUBLIC_BASE_URL')?.trim();
+    if (publicBase) {
+      return `${publicBase.replace(/\/+$/, '')}/${avatarKey}`;
+    }
+    return this.s3.presignedGetUrl(avatarKey);
+  }
+
+  async getPublicSharedSession(
+    shareToken: string,
+  ): Promise<PublicSharedSessionDto> {
+    const token = shareToken.trim();
+    if (!token) {
+      throw new NotFoundException('Shared session not found');
+    }
+
+    const session = await this.surfSessionModel
+      .findOne({ shareToken: token })
+      .lean()
+      .exec();
+    if (!session || session.sessionKind === 'personal') {
+      throw new NotFoundException('Shared session not found');
+    }
+
+    const [partner, region, spot, jobs] = await Promise.all([
+      this.partnerProfileModel
+        .findOne({ userId: session.userId })
+        .lean()
+        .exec(),
+      this.regionModel.findOne({ regionId: session.regionId }).lean().exec(),
+      this.spotModel.findOne({ spotId: session.spotId }).lean().exec(),
+      this.videoJobModel
+        .find({
+          userId: session.userId,
+          surfSessionId: session.sessionId,
+          status: 'completed',
+          processedKey: { $exists: true, $ne: null },
+        })
+        .sort({ createdAt: -1 })
+        .lean()
+        .exec(),
+    ]);
+
+    const countryCode = session.countryCode;
+    const isUndisclosed =
+      isUndisclosedRegionId(session.regionId, countryCode) ||
+      isUndisclosedSpotId(session.spotId, countryCode);
+    const regionName =
+      region?.name?.trim() ||
+      (isUndisclosedRegionId(session.regionId, countryCode)
+        ? 'Undisclosed'
+        : 'Unknown');
+    const spotName = isUndisclosed ? null : spot?.name?.trim() || null;
+
+    const partnerName =
+      typeof partner?.partnerName === 'string' && partner.partnerName.trim()
+        ? partner.partnerName.trim()
+        : null;
+    const partnerAvatarUrl = await this.resolveAvatarUrl(
+      partner?.avatarKey ?? null,
+    );
+
+    const waves: PublicSharedSessionWaveDto[] = [];
+    for (const doc of jobs) {
+      if (!doc.processedKey) continue;
+      const snapKeys = (doc.snapshotKeys ?? []).slice(0, LIST_THUMBNAIL_MAX);
+      const thumbnailUrls: string[] = [];
+      for (const key of snapKeys) {
+        thumbnailUrls.push(await this.s3.presignedGetUrl(key));
+      }
+      waves.push({
+        jobId: doc.jobId,
+        originalFilename: doc.originalFilename ?? 'video',
+        createdAt: doc.createdAt,
+        thumbnailUrls,
+        videoUrl: await this.s3.presignedGetUrl(doc.processedKey),
+      });
+    }
+
+    return {
+      partnerName,
+      partnerAvatarUrl,
+      session: {
+        sessionDate: session.sessionDate,
+        sessionTime:
+          typeof session.sessionTime === 'string' &&
+          SESSION_TIME.test(session.sessionTime)
+            ? session.sessionTime
+            : '12:00',
+        durationMinutes:
+          typeof session.durationMinutes === 'number' &&
+          Number.isFinite(session.durationMinutes) &&
+          session.durationMinutes > 0
+            ? Math.round(session.durationMinutes)
+            : 120,
+        conditionsRating:
+          typeof session.conditionsRating === 'number' &&
+          Number.isInteger(session.conditionsRating) &&
+          session.conditionsRating >= 1 &&
+          session.conditionsRating <= 5
+            ? session.conditionsRating
+            : null,
+        waveTypes: this.normalizeWaveTypes(session.waveTypes),
+        countryCode,
+        regionName,
+        spotName,
+        isUndisclosed,
+      },
+      waves,
+    };
+  }
+}

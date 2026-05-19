@@ -140,6 +140,15 @@ export class StudioController {
     });
   }
 
+  @Post('sessions/:sessionId/share')
+  @HttpCode(HttpStatus.OK)
+  ensureSessionShare(
+    @AuthUserId() userId: string,
+    @Param('sessionId', new ParseUUIDPipe({ version: '4' })) sessionId: string,
+  ) {
+    return this.studio.ensureSessionShareToken(userId, sessionId);
+  }
+
   @Patch('sessions/:sessionId')
   updateSession(
     @AuthUserId() userId: string,
