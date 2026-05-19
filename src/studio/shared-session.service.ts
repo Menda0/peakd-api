@@ -1,4 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import type { OpenedSessionExportDownload } from './session-export.service';
+import { SessionExportService } from './session-export.service';
 import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
@@ -22,12 +24,21 @@ export type PublicSharedSessionWaveDto = {
   originalFilename: string;
   createdAt: string;
   thumbnailUrls: string[];
+  thumbnailUrl: string | null;
   videoUrl: string;
+  processedDownloadUrl: string;
+  hasOriginal: boolean;
+  originalDownloadUrl: string | null;
 };
 
 export type PublicSharedSessionDto = {
+  shareToken: string;
   partnerName: string | null;
   partnerAvatarUrl: string | null;
+  exports: {
+    processedReady: boolean;
+    processedExportStatus: string;
+  };
   session: {
     sessionDate: string;
     sessionTime: string;
@@ -47,6 +58,7 @@ export class SharedSessionService {
   constructor(
     private readonly config: ConfigService,
     private readonly s3: S3Service,
+    private readonly sessionExport: SessionExportService,
     @InjectModel(SurfSession.name)
     private readonly surfSessionModel: Model<SurfSession>,
     @InjectModel(VideoJob.name)
@@ -64,6 +76,40 @@ export class SharedSessionService {
     return raw.filter(
       (w): w is string =>
         typeof w === 'string' && WAVE_TYPE_ID_SET.has(w as never),
+    );
+  }
+
+  private async findSessionByShareToken(token: string): Promise<SurfSession> {
+    const session = await this.surfSessionModel
+      .findOne({ shareToken: token })
+      .lean()
+      .exec();
+    if (!session || session.sessionKind === 'personal') {
+      throw new NotFoundException('Shared session not found');
+    }
+    return session as SurfSession;
+  }
+
+  private isRawOriginalDownloadAllowed(session: SurfSession): boolean {
+    if (session.rawExportStatus !== 'ready') {
+      return false;
+    }
+    const expiresAt = session.rawExportExpiresAt
+      ? Date.parse(session.rawExportExpiresAt)
+      : NaN;
+    if (!Number.isFinite(expiresAt)) {
+      return true;
+    }
+    return expiresAt > Date.now();
+  }
+
+  async openPublicProcessedExportDownload(
+    shareToken: string,
+  ): Promise<OpenedSessionExportDownload> {
+    const session = await this.findSessionByShareToken(shareToken.trim());
+    return this.sessionExport.openProcessedExportDownload(
+      session.userId,
+      session.sessionId,
     );
   }
 
@@ -86,13 +132,8 @@ export class SharedSessionService {
       throw new NotFoundException('Shared session not found');
     }
 
-    const session = await this.surfSessionModel
-      .findOne({ shareToken: token })
-      .lean()
-      .exec();
-    if (!session || session.sessionKind === 'personal') {
-      throw new NotFoundException('Shared session not found');
-    }
+    const session = await this.findSessionByShareToken(token);
+    const rawOriginalsAllowed = this.isRawOriginalDownloadAllowed(session);
 
     const [partner, region, spot, jobs] = await Promise.all([
       this.partnerProfileModel
@@ -140,18 +181,39 @@ export class SharedSessionService {
       for (const key of snapKeys) {
         thumbnailUrls.push(await this.s3.presignedGetUrl(key));
       }
+      const processedDownloadUrl = await this.s3.presignedGetUrl(
+        doc.processedKey,
+      );
+      const rawKey =
+        typeof doc.rawOriginalKey === 'string' && doc.rawOriginalKey.trim()
+          ? doc.rawOriginalKey.trim()
+          : null;
+      const hasOriginal = Boolean(rawKey) && rawOriginalsAllowed;
       waves.push({
         jobId: doc.jobId,
         originalFilename: doc.originalFilename ?? 'video',
         createdAt: doc.createdAt,
         thumbnailUrls,
-        videoUrl: await this.s3.presignedGetUrl(doc.processedKey),
+        thumbnailUrl: thumbnailUrls[0] ?? null,
+        videoUrl: processedDownloadUrl,
+        processedDownloadUrl,
+        hasOriginal,
+        originalDownloadUrl:
+          hasOriginal && rawKey
+            ? await this.s3.presignedGetUrlRaw(rawKey)
+            : null,
       });
     }
 
     return {
+      shareToken: token,
       partnerName,
       partnerAvatarUrl,
+      exports: {
+        processedReady:
+          session.exportStatus === 'ready' && Boolean(session.exportZipKey),
+        processedExportStatus: session.exportStatus ?? 'idle',
+      },
       session: {
         sessionDate: session.sessionDate,
         sessionTime:
