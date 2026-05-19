@@ -2227,7 +2227,7 @@
   dependencies:
     "@types/express" "*"
 
-"@types/node@*", "@types/node@^22.10.0", "@types/node@>=18":
+"@types/node@*", "@types/node@^22.10.0", "@types/node@>=12.x.x", "@types/node@>=18":
   version "22.19.18"
   resolved "https://registry.npmjs.org/@types/node/-/node-22.19.18.tgz"
   integrity sha512-9v00a+dn2yWVsYDEunWC4g/TcRKVq3r8N5FuZp7u0SGrPvdN9c2yXI9bBuf5Fl0hNCb+QTIePTn5pJs2pwBOQQ==
@@ -5247,7 +5247,7 @@ pure-rand@^6.0.0:
   resolved "https://registry.npmjs.org/pure-rand/-/pure-rand-6.1.0.tgz"
   integrity sha512-bVWawvoZoBYpp6yIoQtQXHZjmz35RSVHnUOTefl8Vcjr8snTPY1wnpSPMWekcFwbxI6gtmT7rSYPFvz71ldiOA==
 
-qs@^6.14.0, qs@^6.14.1:
+qs@^6.11.0, qs@^6.14.0, qs@^6.14.1:
   version "6.15.1"
   resolved "https://registry.npmjs.org/qs/-/qs-6.15.1.tgz"
   integrity sha512-6YHEFRL9mfgcAvql/XhwTvf5jKcOiiupt2FiJxHkiX1z4j7WL8J/jRHYLluORvc1XxB5rV20KoeK00gVJamspg==
@@ -5703,6 +5703,13 @@ strip-json-comments@^3.1.1:
   version "3.1.1"
   resolved "https://registry.npmjs.org/strip-json-comments/-/strip-json-comments-3.1.1.tgz"
   integrity sha512-6fPc+R4ihwqP6N/aIv2f1gMH8lOVtWQHoqC4yK6oSDVVocumAsfCqjkXnqiYMhmMwS/mEHLp7Vehlt3ql6lEig==
+
+stripe@^18.5.0:
+  version "18.5.0"
+  resolved "https://registry.npmjs.org/stripe/-/stripe-18.5.0.tgz"
+  integrity sha512-Hp+wFiEQtCB0LlNgcFh5uVyKznpDjzyUZ+CNVEf+I3fhlYvh7rZruIg+jOwzJRCpy0ZTPMjlzm7J2/M2N6d+DA==
+  dependencies:
+    qs "^6.11.0"
 
 strnum@^2.2.3:
   version "2.3.0"

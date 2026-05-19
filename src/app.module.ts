@@ -7,15 +7,17 @@ import { UsersModule } from './users/users.module';
 import { FeedModule } from './feed/feed.module';
 import { StudioModule } from './studio/studio.module';
 import { AdminModule } from './admin/admin.module';
+import { BillingModule } from './billing/billing.module';
 import { S3Module } from './s3/s3.module';
 import { videoConfig } from './config/video.config';
 import { auth0Config } from './config/auth0.config';
+import { billingConfig } from './config/billing.config';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      load: [videoConfig, auth0Config],
+      load: [videoConfig, auth0Config, billingConfig],
     }),
     MongooseModule.forRootAsync({
       imports: [ConfigModule],
@@ -31,6 +33,7 @@ import { auth0Config } from './config/auth0.config';
     PartnerModule,
     UsersModule,
     FeedModule,
+    BillingModule,
   ],
 })
 export class AppModule {}

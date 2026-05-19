@@ -29,6 +29,10 @@ export class UserProfile {
   /** S3 object key for the app user profile avatar image. */
   @Prop({ type: String, default: null })
   avatarKey: string | null;
+
+  /** Virtual currency balance (peaks). */
+  @Prop({ type: Number, default: 0, min: 0 })
+  peaksBalance: number;
 }
 
 export const UserProfileSchema = SchemaFactory.createForClass(UserProfile);
