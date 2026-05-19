@@ -15,6 +15,10 @@ import {
   PartnerProfile,
   PartnerProfileSchema,
 } from '../partner/schemas/partner-profile.schema';
+import {
+  UserProfile,
+  UserProfileSchema,
+} from '../users/schemas/user-profile.schema';
 
 @Module({
   imports: [
@@ -25,6 +29,7 @@ import {
       { name: SurfSession.name, schema: SurfSessionSchema },
       { name: VideoJob.name, schema: VideoJobSchema },
       { name: PartnerProfile.name, schema: PartnerProfileSchema },
+      { name: UserProfile.name, schema: UserProfileSchema },
     ]),
   ],
   controllers: [StudioController, PublicSharedSessionController],

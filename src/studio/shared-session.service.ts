@@ -4,7 +4,9 @@ import { SessionExportService } from './session-export.service';
 import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
+import type { SurferProfileDto } from '../feed/feed.service';
 import { PartnerProfile } from '../partner/schemas/partner-profile.schema';
+import { UserProfile } from '../users/schemas/user-profile.schema';
 import { S3Service } from '../s3/s3.service';
 import { VideoJob } from '../video/schemas/video-job.schema';
 import {
@@ -29,6 +31,9 @@ export type PublicSharedSessionWaveDto = {
   processedDownloadUrl: string;
   hasOriginal: boolean;
   originalDownloadUrl: string | null;
+  claimStatus: 'none' | 'claimed' | 'auto';
+  canClaim: boolean;
+  surfer: SurferProfileDto | null;
 };
 
 export type PublicSharedSessionDto = {
@@ -69,6 +74,8 @@ export class SharedSessionService {
     private readonly spotModel: Model<Spot>,
     @InjectModel(PartnerProfile.name)
     private readonly partnerProfileModel: Model<PartnerProfile>,
+    @InjectModel(UserProfile.name)
+    private readonly userProfileModel: Model<UserProfile>,
   ) {}
 
   private normalizeWaveTypes(raw: unknown): string[] {
@@ -110,6 +117,71 @@ export class SharedSessionService {
     return this.sessionExport.openProcessedExportDownload(
       session.userId,
       session.sessionId,
+    );
+  }
+
+  private surferUserIdFromJob(doc: {
+    userId: string;
+    claimStatus?: string;
+    claimedByUserId?: string | null;
+  }): string | null {
+    const claimStatus = doc.claimStatus ?? 'none';
+    if (claimStatus === 'claimed') {
+      const claimedBy = doc.claimedByUserId?.trim();
+      if (claimedBy) return claimedBy;
+    }
+    if (claimStatus === 'auto') {
+      const uploader = doc.userId?.trim();
+      if (uploader) return uploader;
+    }
+    return null;
+  }
+
+  private async buildSurferDto(userId: string): Promise<SurferProfileDto> {
+    const profile = await this.userProfileModel
+      .findOne({ userId })
+      .lean()
+      .exec();
+    const avatarUrl = await this.resolveAvatarUrl(profile?.avatarKey ?? null);
+    const homeRegionId = profile?.homeRegionId?.trim() || null;
+    let regionName: string | null = null;
+    if (homeRegionId) {
+      const region = await this.regionModel
+        .findOne({ regionId: homeRegionId })
+        .lean()
+        .exec();
+      regionName = region?.name?.trim() || null;
+    }
+    return {
+      userId,
+      displayName: profile?.displayName ?? null,
+      avatarUrl,
+      surfLevel: profile?.surfLevel ?? null,
+      countryCode: profile?.countryCode?.trim().toUpperCase() || null,
+      regionName,
+    };
+  }
+
+  private async resolveWaveSurfer(doc: {
+    userId: string;
+    claimStatus?: string;
+    claimedByUserId?: string | null;
+  }): Promise<SurferProfileDto | null> {
+    const surferId = this.surferUserIdFromJob(doc);
+    if (!surferId) return null;
+    return this.buildSurferDto(surferId);
+  }
+
+  private waveCanBeClaimed(doc: {
+    uploadSource?: string;
+    discoverPublishedAt?: string | null;
+    claimStatus?: string;
+  }): boolean {
+    if (doc.uploadSource !== 'studio') return false;
+    if (doc.claimStatus !== 'none') return false;
+    return Boolean(
+      typeof doc.discoverPublishedAt === 'string' &&
+        doc.discoverPublishedAt.trim(),
     );
   }
 
@@ -189,6 +261,11 @@ export class SharedSessionService {
           ? doc.rawOriginalKey.trim()
           : null;
       const hasOriginal = Boolean(rawKey) && rawOriginalsAllowed;
+      const claimStatus =
+        doc.claimStatus === 'claimed' || doc.claimStatus === 'auto'
+          ? doc.claimStatus
+          : 'none';
+      const surfer = await this.resolveWaveSurfer(doc);
       waves.push({
         jobId: doc.jobId,
         originalFilename: doc.originalFilename ?? 'video',
@@ -202,6 +279,9 @@ export class SharedSessionService {
           hasOriginal && rawKey
             ? await this.s3.presignedGetUrlRaw(rawKey)
             : null,
+        claimStatus,
+        canClaim: this.waveCanBeClaimed(doc),
+        surfer,
       });
     }
 
