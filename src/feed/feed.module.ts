@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { Auth0JwtGuard } from '../auth/auth0-jwt.guard';
+import { CommercialModule } from '../commercial/commercial.module';
 import { S3Module } from '../s3/s3.module';
 import { Region, RegionSchema } from '../studio/schemas/region.schema';
 import { Spot, SpotSchema } from '../studio/schemas/spot.schema';
@@ -16,6 +17,7 @@ import { FeedService } from './feed.service';
 
 @Module({
   imports: [
+    CommercialModule,
     S3Module,
     MongooseModule.forFeature([
       { name: VideoJob.name, schema: VideoJobSchema },

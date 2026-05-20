@@ -1,5 +1,9 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument } from 'mongoose';
+import {
+  CommercialSettingsEmbed,
+  CommercialSettingsEmbedSchema,
+} from '../../commercial/schemas/commercial-settings.embed';
 
 export type PartnerProfileDocument = HydratedDocument<PartnerProfile>;
 
@@ -29,6 +33,10 @@ export class PartnerProfile {
   /** ISO 3166-1 alpha-2 */
   @Prop({ type: String, default: null })
   countryCode: string | null;
+
+  /** Default Peaks pricing for commercial studio sessions. */
+  @Prop({ type: CommercialSettingsEmbedSchema, default: null })
+  commercialSettings: CommercialSettingsEmbed | null;
 }
 
 export const PartnerProfileSchema = SchemaFactory.createForClass(PartnerProfile);

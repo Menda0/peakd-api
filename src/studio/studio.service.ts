@@ -10,6 +10,13 @@ import { randomUUID } from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { Region } from './schemas/region.schema';
 import { Spot } from './schemas/spot.schema';
+import {
+  parseCommercialSettings,
+  resolveEffectiveCommercialSettings,
+  validateCommercialSettings,
+} from '../commercial/commercial-pricing';
+import type { CommercialSettings } from '../commercial/commercial-settings.types';
+import { PartnerProfile } from '../partner/schemas/partner-profile.schema';
 import { SurfSession } from './schemas/surf-session.schema';
 import { VideoJob } from '../video/schemas/video-job.schema';
 import { S3Service } from '../s3/s3.service';
@@ -72,6 +79,9 @@ export type SurfSessionListItemDto = {
   rawExportErrorMessage: string | null;
   rawExportExpiresAt: string | null;
   shareToken: string | null;
+  isCommercial: boolean;
+  commercialSettings: CommercialSettings | null;
+  effectiveCommercialSettings: CommercialSettings | null;
   spotName?: string;
   regionName?: string;
   videoCount: number;
@@ -95,6 +105,8 @@ export class StudioService {
     private readonly surfSessionModel: Model<SurfSession>,
     @InjectModel(VideoJob.name)
     private readonly videoJobModel: Model<VideoJob>,
+    @InjectModel(PartnerProfile.name)
+    private readonly partnerProfileModel: Model<PartnerProfile>,
     private readonly s3: S3Service,
   ) {}
 
@@ -253,10 +265,18 @@ export class StudioService {
     rawExportExpiresAt?: string | null;
     sessionKind?: string;
     shareToken?: string | null;
+    isCommercial?: boolean;
+    commercialSettings?: unknown;
   }): Omit<
     SurfSessionListItemDto,
-    'spotName' | 'regionName' | 'videoCount' | 'previewThumbnailUrls'
+    | 'spotName'
+    | 'regionName'
+    | 'videoCount'
+    | 'previewThumbnailUrls'
+    | 'effectiveCommercialSettings'
   > {
+    const isCommercial = d.isCommercial === true;
+    const commercialSettings = parseCommercialSettings(d.commercialSettings);
     return {
       sessionId: d.sessionId,
       sessionKind: d.sessionKind === 'personal' ? 'personal' : 'studio',
@@ -308,7 +328,41 @@ export class StudioService {
         typeof d.shareToken === 'string' && d.shareToken.trim()
           ? d.shareToken.trim()
           : null,
+      isCommercial,
+      commercialSettings,
     };
+  }
+
+  private async enrichSessionCommercial(
+    userId: string,
+    core: Omit<
+      SurfSessionListItemDto,
+      | 'spotName'
+      | 'regionName'
+      | 'videoCount'
+      | 'previewThumbnailUrls'
+      | 'effectiveCommercialSettings'
+    >,
+  ): Promise<
+    Omit<
+      SurfSessionListItemDto,
+      'spotName' | 'regionName' | 'videoCount' | 'previewThumbnailUrls'
+    >
+  > {
+    const partner = await this.partnerProfileModel
+      .findOne({ userId })
+      .lean()
+      .exec();
+    const effectiveCommercialSettings = core.isCommercial
+      ? resolveEffectiveCommercialSettings(
+          {
+            isCommercial: true,
+            commercialSettings: core.commercialSettings,
+          },
+          partner,
+        )
+      : null;
+    return { ...core, effectiveCommercialSettings };
   }
 
   private async countCompletedSessionVideos(
@@ -667,8 +721,12 @@ export class StudioService {
         videoCount: 0,
         previewThumbnailUrls: [],
       };
+      const core = await this.enrichSessionCommercial(
+        userId,
+        this.sessionCoreDto(d),
+      );
       items.push({
-        ...this.sessionCoreDto(d),
+        ...core,
         spotName: spot?.name,
         regionName: region?.name,
         videoCount: preview.videoCount,
@@ -696,13 +754,55 @@ export class StudioService {
     const preview = (
       await this.sessionVideoPreviews(userId, [sessionId])
     ).get(sessionId) ?? { videoCount: 0, previewThumbnailUrls: [] };
+    const core = await this.enrichSessionCommercial(
+      userId,
+      this.sessionCoreDto(d),
+    );
     return {
-      ...this.sessionCoreDto(d),
+      ...core,
       spotName: spot?.name,
       regionName: region?.name,
       videoCount: preview.videoCount,
       previewThumbnailUrls: preview.previewThumbnailUrls,
     };
+  }
+
+  private async ensurePartnerForCommercial(userId: string): Promise<void> {
+    const partner = await this.partnerProfileModel
+      .findOne({ userId })
+      .lean()
+      .exec();
+    if (!partner) {
+      throw new BadRequestException(
+        'Only partners can create or edit commercial sessions',
+      );
+    }
+  }
+
+  private parseSessionCommercialFields(
+    body: {
+      isCommercial?: unknown;
+      commercialSettings?: unknown;
+    },
+    existing?: { isCommercial?: boolean; commercialSettings?: unknown },
+  ): { isCommercial: boolean; commercialSettings: CommercialSettings | null } {
+    const isCommercial =
+      'isCommercial' in body
+        ? body.isCommercial === true
+        : (existing?.isCommercial === true);
+    let commercialSettings: CommercialSettings | null = null;
+    if ('commercialSettings' in body) {
+      if (body.commercialSettings == null) {
+        commercialSettings = null;
+      } else {
+        commercialSettings = validateCommercialSettings(
+          body.commercialSettings as CommercialSettings,
+        );
+      }
+    } else if (existing) {
+      commercialSettings = parseCommercialSettings(existing.commercialSettings);
+    }
+    return { isCommercial, commercialSettings };
   }
 
   async createSession(
@@ -717,11 +817,39 @@ export class StudioService {
       conditionsRating?: number | string | null;
       waveTypes?: unknown;
       sessionKind?: 'studio' | 'personal';
+      isCommercial?: boolean;
+      commercialSettings?: unknown;
     },
   ): Promise<SurfSessionDetailDto> {
     const payload = await this.resolveSessionPayload(userId, body);
     const sessionKind =
       body.sessionKind === 'personal' ? 'personal' : 'studio';
+    if (sessionKind === 'personal' && body.isCommercial === true) {
+      throw new BadRequestException('Personal sessions cannot be commercial');
+    }
+    let commercialFields = { isCommercial: false, commercialSettings: null as CommercialSettings | null };
+    if (body.isCommercial === true || body.commercialSettings != null) {
+      await this.ensurePartnerForCommercial(userId);
+      commercialFields = this.parseSessionCommercialFields(body);
+      if (commercialFields.isCommercial) {
+        const partner = await this.partnerProfileModel
+          .findOne({ userId })
+          .lean()
+          .exec();
+        const effective = resolveEffectiveCommercialSettings(
+          {
+            isCommercial: true,
+            commercialSettings: commercialFields.commercialSettings,
+          },
+          partner,
+        );
+        if (!effective) {
+          throw new BadRequestException(
+            'Configure commercial pricing on your partner profile first',
+          );
+        }
+      }
+    }
     const sessionId = uuidv4();
     const createdAt = new Date().toISOString();
     await this.surfSessionModel.create({
@@ -729,6 +857,8 @@ export class StudioService {
       userId,
       ...payload,
       sessionKind,
+      isCommercial: commercialFields.isCommercial,
+      commercialSettings: commercialFields.commercialSettings,
       createdAt,
     });
     return this.getSession(userId, sessionId);
@@ -746,6 +876,8 @@ export class StudioService {
       durationMinutes?: number | string;
       conditionsRating?: number | string | null;
       waveTypes?: unknown;
+      isCommercial?: boolean;
+      commercialSettings?: unknown;
     },
   ): Promise<SurfSessionDetailDto> {
     const existing = await this.surfSessionModel
@@ -758,24 +890,52 @@ export class StudioService {
     if (existing.status === 'closed') {
       throw new BadRequestException('Cannot edit a closed session');
     }
+    if (existing.sessionKind === 'personal' && body.isCommercial === true) {
+      throw new BadRequestException('Personal sessions cannot be commercial');
+    }
 
     const payload = await this.resolveSessionPayload(userId, body);
+
+    const setFields: Record<string, unknown> = {
+      countryCode: payload.countryCode,
+      regionId: payload.regionId,
+      spotId: payload.spotId,
+      sessionDate: payload.sessionDate,
+      sessionTime: payload.sessionTime,
+      durationMinutes: payload.durationMinutes,
+      conditionsRating: payload.conditionsRating,
+      waveTypes: payload.waveTypes,
+    };
+
+    if ('isCommercial' in body || 'commercialSettings' in body) {
+      await this.ensurePartnerForCommercial(userId);
+      const commercialFields = this.parseSessionCommercialFields(body, existing);
+      if (commercialFields.isCommercial) {
+        const partner = await this.partnerProfileModel
+          .findOne({ userId })
+          .lean()
+          .exec();
+        const effective = resolveEffectiveCommercialSettings(
+          {
+            isCommercial: true,
+            commercialSettings: commercialFields.commercialSettings,
+          },
+          partner,
+        );
+        if (!effective) {
+          throw new BadRequestException(
+            'Configure commercial pricing on your partner profile first',
+          );
+        }
+      }
+      setFields.isCommercial = commercialFields.isCommercial;
+      setFields.commercialSettings = commercialFields.commercialSettings;
+    }
 
     await this.surfSessionModel
       .updateOne(
         { sessionId, userId },
-        {
-          $set: {
-            countryCode: payload.countryCode,
-            regionId: payload.regionId,
-            spotId: payload.spotId,
-            sessionDate: payload.sessionDate,
-            sessionTime: payload.sessionTime,
-            durationMinutes: payload.durationMinutes,
-            conditionsRating: payload.conditionsRating,
-            waveTypes: payload.waveTypes,
-          },
-        },
+        { $set: setFields },
       )
       .exec();
 

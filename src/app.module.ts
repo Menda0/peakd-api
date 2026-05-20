@@ -8,6 +8,7 @@ import { FeedModule } from './feed/feed.module';
 import { StudioModule } from './studio/studio.module';
 import { AdminModule } from './admin/admin.module';
 import { BillingModule } from './billing/billing.module';
+import { CommercialModule } from './commercial/commercial.module';
 import { S3Module } from './s3/s3.module';
 import { videoConfig } from './config/video.config';
 import { auth0Config } from './config/auth0.config';
@@ -34,6 +35,7 @@ import { billingConfig } from './config/billing.config';
     UsersModule,
     FeedModule,
     BillingModule,
+    CommercialModule,
   ],
 })
 export class AppModule {}

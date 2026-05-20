@@ -9,6 +9,11 @@ import { randomUUID } from 'node:crypto';
 import type { Express } from 'express';
 import { Model } from 'mongoose';
 import { S3Service } from '../s3/s3.service';
+import {
+  parseCommercialSettings,
+  validateCommercialSettings,
+} from '../commercial/commercial-pricing';
+import type { CommercialSettings } from '../commercial/commercial-settings.types';
 import { PartnerProfile } from './schemas/partner-profile.schema';
 
 export type PartnerType = 'videographer' | 'coach' | 'other';
@@ -19,6 +24,7 @@ export interface PartnerProfileResponseDto {
   descriptionMarkdown: string | null;
   avatarUrl: string | null;
   countryCode: string | null;
+  commercialSettings: CommercialSettings | null;
 }
 
 export interface PartnerProfilePatchBody {
@@ -27,6 +33,7 @@ export interface PartnerProfilePatchBody {
   descriptionMarkdown?: string | null;
   countryCode?: string | null;
   avatarKey?: string | null;
+  commercialSettings?: CommercialSettings | null;
 }
 
 export interface AvatarPresignResponseDto {
@@ -100,12 +107,19 @@ export class PartnerProfileService {
     );
   }
 
+  private commercialSettingsFromDoc(
+    doc: { commercialSettings?: unknown },
+  ): CommercialSettings | null {
+    return parseCommercialSettings(doc.commercialSettings);
+  }
+
   private async toDto(doc: {
     partnerName: string | null;
     partnerType: string;
     descriptionMarkdown: string | null;
     avatarKey: string | null;
     countryCode: string | null;
+    commercialSettings?: unknown;
   }): Promise<PartnerProfileResponseDto> {
     return {
       partnerName: doc.partnerName,
@@ -113,6 +127,7 @@ export class PartnerProfileService {
       descriptionMarkdown: doc.descriptionMarkdown,
       avatarUrl: await this.resolveAvatarUrl(doc.avatarKey),
       countryCode: doc.countryCode,
+      commercialSettings: this.commercialSettingsFromDoc(doc),
     };
   }
 
@@ -191,6 +206,14 @@ export class PartnerProfileService {
         patch.avatarKey = body.avatarKey;
       } else {
         throw new BadRequestException('avatarKey must be a string or null');
+      }
+    }
+
+    if ('commercialSettings' in body) {
+      if (body.commercialSettings === null || body.commercialSettings === undefined) {
+        patch.commercialSettings = null;
+      } else {
+        patch.commercialSettings = validateCommercialSettings(body.commercialSettings);
       }
     }
 

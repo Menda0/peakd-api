@@ -17,6 +17,13 @@ import { Spot } from '../studio/schemas/spot.schema';
 import { SurfSession } from '../studio/schemas/surf-session.schema';
 import { PartnerProfile } from '../partner/schemas/partner-profile.schema';
 import { UserProfile } from '../users/schemas/user-profile.schema';
+import { CommercialWaveService } from '../commercial/commercial-wave.service';
+import {
+  computeBuyClaimPeaks,
+  computeSponsorPeaks,
+  resolveEffectiveCommercialSettings,
+} from '../commercial/commercial-pricing';
+import type { CommercialSettings } from '../commercial/commercial-settings.types';
 import { VideoJob } from '../video/schemas/video-job.schema';
 import type { VideoJobStatus } from '../video/schemas/video-job.schema';
 import type { VideoClaimStatus } from '../video/schemas/video-job.schema';
@@ -31,6 +38,7 @@ import {
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
+const SNAPSHOT_URL_MAX = 4;
 
 export interface DiscoverFeedAuthorDto {
   userId: string;
@@ -70,6 +78,15 @@ export interface DiscoverFeedItemDto {
   claimedByViewer: boolean;
   isOwnUpload: boolean;
   surfer: SurferProfileDto | null;
+  isCommercial: boolean;
+  snapshotUrls: string[];
+  videoUnlockedByViewer: boolean;
+  wavePricePeaks: number | null;
+  buyClaimPricePeaks: number | null;
+  sponsorPricePeaks: number | null;
+  canClaim: boolean;
+  canBuyClaim: boolean;
+  canSponsor: boolean;
 }
 
 export interface SurferProfileDto {
@@ -100,6 +117,11 @@ export interface MyVideoItemDto {
   uploadSource: 'studio' | 'personal';
   surfer: SurferProfileDto | null;
   filmedBy: FilmedByDto | null;
+  isCommercial: boolean;
+  snapshotUrls: string[];
+  videoUnlockedByViewer: boolean;
+  wavePricePeaks: number | null;
+  buyClaimPricePeaks: number | null;
 }
 
 export interface DiscoverFeedPageDto {
@@ -131,7 +153,10 @@ type AggregatedRow = {
     durationMinutes?: number;
     conditionsRating?: number | null;
     waveTypes?: string[];
+    isCommercial?: boolean;
+    commercialSettings?: unknown;
   };
+  videoUnlockedForUserId?: string | null;
   authorProfile?: Array<{
     displayName: string | null;
     avatarKey: string | null;
@@ -158,6 +183,7 @@ export class FeedService {
     private readonly spotModel: Model<Spot>,
     private readonly s3: S3Service,
     private readonly config: ConfigService,
+    private readonly commercialWave: CommercialWaveService,
   ) {}
 
   private parseLimit(raw: string | undefined): number {
@@ -182,6 +208,128 @@ export class FeedService {
   private isCompleted(doc: { status?: string; processedKey?: string | null }): boolean {
     if (doc.status === 'completed') return true;
     return Boolean(doc.processedKey?.trim());
+  }
+
+  private async presignSnapshotUrls(
+    snapshotKeys?: string[],
+  ): Promise<string[]> {
+    const keys = (snapshotKeys ?? []).slice(0, SNAPSHOT_URL_MAX);
+    const urls: string[] = [];
+    for (const key of keys) {
+      if (key?.trim()) {
+        urls.push(await this.s3.presignedGetUrl(key));
+      }
+    }
+    return urls;
+  }
+
+  private commercialExtras(
+    session: {
+      isCommercial?: boolean;
+      commercialSettings?: unknown;
+      userId: string;
+    },
+    partner: { commercialSettings?: unknown } | null,
+    job: {
+      claimStatus?: VideoClaimStatus;
+      claimedByUserId?: string | null;
+      videoUnlockedForUserId?: string | null;
+    },
+    viewerUserId: string,
+  ): {
+    isCommercial: boolean;
+    snapshotUrls: string[];
+    videoUnlockedByViewer: boolean;
+    wavePricePeaks: number | null;
+    buyClaimPricePeaks: number | null;
+    sponsorPricePeaks: number | null;
+    canClaim: boolean;
+    canBuyClaim: boolean;
+    canSponsor: boolean;
+  } {
+    const isCommercial = session.isCommercial === true;
+    if (!isCommercial) {
+      return {
+        isCommercial: false,
+        snapshotUrls: [],
+        videoUnlockedByViewer: true,
+        wavePricePeaks: null,
+        buyClaimPricePeaks: null,
+        sponsorPricePeaks: null,
+        canClaim: false,
+        canBuyClaim: false,
+        canSponsor: false,
+      };
+    }
+    const settings = resolveEffectiveCommercialSettings(
+      {
+        isCommercial: session.isCommercial,
+        commercialSettings:
+          session.commercialSettings as CommercialSettings | null,
+      },
+      partner as { commercialSettings?: CommercialSettings | null } | null,
+    );
+    const claimStatus = job.claimStatus ?? 'none';
+    const unlockedFor = job.videoUnlockedForUserId?.trim() || null;
+    const claimedBy = job.claimedByUserId?.trim() || null;
+    const videoUnlockedByViewer = unlockedFor === viewerUserId;
+    const wavePricePeaks = settings?.videoPricePeaks ?? null;
+    const buyClaimPricePeaks = settings
+      ? computeBuyClaimPeaks(settings, 1).totalPeaks
+      : null;
+    const sponsorPricePeaks = settings ? computeSponsorPeaks(settings, 1) : null;
+    const canClaim =
+      claimStatus === 'none' && !unlockedFor;
+    const canBuyClaim = Boolean(settings && buyClaimPricePeaks != null);
+    const canSponsor =
+      Boolean(settings) &&
+      claimStatus === 'claimed' &&
+      Boolean(claimedBy) &&
+      !unlockedFor &&
+      claimedBy !== viewerUserId;
+    return {
+      isCommercial: true,
+      snapshotUrls: [],
+      videoUnlockedByViewer,
+      wavePricePeaks,
+      buyClaimPricePeaks,
+      sponsorPricePeaks,
+      canClaim,
+      canBuyClaim,
+      canSponsor,
+    };
+  }
+
+  async buyAndClaimVideoWave(
+    viewerUserId: string,
+    jobId: string,
+    quantity = 1,
+  ): Promise<{
+    jobId: string;
+    claimStatus: VideoClaimStatus;
+    claimedAt: string;
+    peaksCharged: number;
+    discountPercent: number;
+    surfer: SurferProfileDto;
+  }> {
+    const result = await this.commercialWave.buyAndClaimWave(
+      viewerUserId,
+      jobId,
+      quantity,
+    );
+    const surfer = await this.buildSurferDto(viewerUserId);
+    return { ...result, surfer };
+  }
+
+  async sponsorVideoWave(
+    sponsorUserId: string,
+    jobId: string,
+  ): Promise<{
+    jobId: string;
+    peaksCharged: number;
+    beneficiaryUserId: string;
+  }> {
+    return this.commercialWave.sponsorWaveUnlock(sponsorUserId, jobId);
   }
 
   async publishVideoToDiscover(
@@ -450,12 +598,14 @@ export class FeedService {
         doc.userId !== userId
           ? await this.buildFilmedByDto(doc.userId)
           : null;
+      const playbackUrl =
+        !dto.isCommercial || dto.videoUnlockedByViewer ? dto.videoUrl : null;
       items.push({
         jobId: dto.jobId,
         createdAt: dto.createdAt,
         status: dto.status,
         thumbnailUrl: dto.thumbnailUrl,
-        videoUrl: dto.videoUrl,
+        videoUrl: playbackUrl,
         location: dto.location,
         session: dto.session,
         claimStatus: dto.claimStatus,
@@ -463,6 +613,11 @@ export class FeedService {
         uploadSource: doc.uploadSource === 'personal' ? 'personal' : 'studio',
         surfer: isViewerSurfer ? surfer : null,
         filmedBy,
+        isCommercial: dto.isCommercial,
+        snapshotUrls: dto.snapshotUrls,
+        videoUnlockedByViewer: dto.videoUnlockedByViewer,
+        wavePricePeaks: dto.wavePricePeaks,
+        buyClaimPricePeaks: dto.buyClaimPricePeaks,
       });
     }
     return items;
@@ -706,14 +861,26 @@ export class FeedService {
       (isUndisclosedRegionId(session.regionId, countryCode) ? 'Undisclosed' : '');
     const spotName = isUndisclosed ? null : spot?.name?.trim() || null;
 
+    const isCommercial = session.isCommercial === true;
+    const snapshotUrls = await this.presignSnapshotUrls(doc.snapshotKeys);
+    const extras = this.commercialExtras(
+      session,
+      partnerProfile,
+      doc,
+      viewerUserId,
+    );
+    extras.snapshotUrls = snapshotUrls;
+
     let videoUrl: string | null = null;
     let thumbnailUrl: string | null = null;
-    if (status === 'completed' && doc.processedKey) {
+    if (status === 'completed' && doc.processedKey && !isCommercial) {
       videoUrl = await this.s3.presignedGetUrl(doc.processedKey);
       const snapKey = doc.snapshotKeys?.[0];
       if (snapKey) {
         thumbnailUrl = await this.s3.presignedGetUrl(snapKey);
       }
+    } else if (snapshotUrls[0]) {
+      thumbnailUrl = snapshotUrls[0];
     }
 
     const [author, surfer] = await Promise.all([
@@ -747,6 +914,7 @@ export class FeedService {
       claimedByViewer: doc.claimedByUserId === viewerUserId,
       isOwnUpload: doc.userId === viewerUserId,
       surfer,
+      ...extras,
     };
   }
 
@@ -773,12 +941,27 @@ export class FeedService {
       | { partnerName?: string | null; avatarKey?: string | null }
       | undefined;
 
-    const processedKey = row.processedKey!;
-    const videoUrl = await this.s3.presignedGetUrl(processedKey);
-    const snapKey = row.snapshotKeys?.[0];
-    const thumbnailUrl = snapKey
-      ? await this.s3.presignedGetUrl(snapKey)
-      : null;
+    const isCommercial = session.isCommercial === true;
+    const snapshotUrls = await this.presignSnapshotUrls(row.snapshotKeys);
+    const extras = this.commercialExtras(
+      { ...session, userId: row.userId },
+      (partnerDoc as { commercialSettings?: unknown } | null) ?? null,
+      row,
+      viewerUserId,
+    );
+    extras.snapshotUrls = snapshotUrls;
+
+    let videoUrl: string | null = null;
+    let thumbnailUrl: string | null = null;
+    if (!isCommercial && row.processedKey) {
+      videoUrl = await this.s3.presignedGetUrl(row.processedKey);
+      const snapKey = row.snapshotKeys?.[0];
+      if (snapKey) {
+        thumbnailUrl = await this.s3.presignedGetUrl(snapKey);
+      }
+    } else if (snapshotUrls[0]) {
+      thumbnailUrl = snapshotUrls[0];
+    }
 
     const [author, surfer] = await Promise.all([
       this.buildDiscoverAuthor(
@@ -811,6 +994,7 @@ export class FeedService {
       claimedByViewer: row.claimedByUserId === viewerUserId,
       isOwnUpload: row.userId === viewerUserId,
       surfer,
+      ...extras,
     };
   }
 }

@@ -1,0 +1,282 @@
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { InjectConnection, InjectModel } from '@nestjs/mongoose';
+import type { Connection, Model } from 'mongoose';
+import { PartnerProfile } from '../partner/schemas/partner-profile.schema';
+import { SurfSession } from '../studio/schemas/surf-session.schema';
+import { UserProfile } from '../users/schemas/user-profile.schema';
+import { VideoJob } from '../video/schemas/video-job.schema';
+import {
+  computeBuyClaimPeaks,
+  computeSponsorPeaks,
+  resolveEffectiveCommercialSettings,
+} from './commercial-pricing';
+import type { CommercialSettings } from './commercial-settings.types';
+import { WaveUnlockPurchase } from './schemas/wave-unlock-purchase.schema';
+
+export type CommercialWaveContext = {
+  job: {
+    jobId: string;
+    userId: string;
+    surfSessionId: string | null;
+    uploadSource?: string;
+    status?: string;
+    processedKey?: string | null;
+    discoverPublishedAt?: string | null;
+    claimStatus?: string;
+    claimedByUserId?: string | null;
+    videoUnlockedForUserId?: string | null;
+  };
+  session: {
+    sessionId: string;
+    userId: string;
+    isCommercial?: boolean;
+    commercialSettings?: CommercialSettings | null;
+  };
+  settings: CommercialSettings;
+};
+
+@Injectable()
+export class CommercialWaveService {
+  constructor(
+    @InjectConnection() private readonly connection: Connection,
+    @InjectModel(VideoJob.name)
+    private readonly videoJobModel: Model<VideoJob>,
+    @InjectModel(SurfSession.name)
+    private readonly surfSessionModel: Model<SurfSession>,
+    @InjectModel(PartnerProfile.name)
+    private readonly partnerProfileModel: Model<PartnerProfile>,
+    @InjectModel(UserProfile.name)
+    private readonly userProfileModel: Model<UserProfile>,
+    @InjectModel(WaveUnlockPurchase.name)
+    private readonly waveUnlockPurchaseModel: Model<WaveUnlockPurchase>,
+  ) {}
+
+  private isCompleted(doc: { status?: string; processedKey?: string | null }): boolean {
+    if (doc.status === 'completed') return true;
+    return Boolean(doc.processedKey?.trim());
+  }
+
+  async loadCommercialContext(jobId: string): Promise<CommercialWaveContext> {
+    const doc = await this.videoJobModel.findOne({ jobId }).lean().exec();
+    if (!doc) {
+      throw new NotFoundException(`Video job not found: ${jobId}`);
+    }
+    if (doc.uploadSource !== 'studio') {
+      throw new BadRequestException('Only partner studio uploads support commercial flows');
+    }
+    if (!this.isCompleted(doc)) {
+      throw new BadRequestException('Only completed videos support commercial flows');
+    }
+    if (!doc.discoverPublishedAt) {
+      throw new BadRequestException('Video must be published to discover');
+    }
+    const sessionId = doc.surfSessionId?.trim();
+    if (!sessionId) {
+      throw new BadRequestException('Video must belong to a surf session');
+    }
+    const session = await this.surfSessionModel
+      .findOne({ sessionId })
+      .lean()
+      .exec();
+    if (!session?.isCommercial) {
+      throw new BadRequestException('Session is not commercial');
+    }
+    const partner = await this.partnerProfileModel
+      .findOne({ userId: session.userId })
+      .lean()
+      .exec();
+    const settings = resolveEffectiveCommercialSettings(session, partner);
+    if (!settings) {
+      throw new BadRequestException('Commercial pricing is not configured for this session');
+    }
+    return {
+      job: doc,
+      session: session as CommercialWaveContext['session'],
+      settings,
+    };
+  }
+
+  private async debitPeaks(
+    userId: string,
+    amount: number,
+    mongoSession: import('mongoose').ClientSession,
+  ): Promise<void> {
+    if (amount < 1) {
+      throw new BadRequestException('Invalid Peaks amount');
+    }
+    const updated = await this.userProfileModel
+      .findOneAndUpdate(
+        { userId, peaksBalance: { $gte: amount } },
+        { $inc: { peaksBalance: -amount } },
+        { session: mongoSession, returnDocument: 'after' },
+      )
+      .lean()
+      .exec();
+    if (!updated) {
+      const doc = await this.userProfileModel.findOne({ userId }).lean().exec();
+      const balance = Math.max(0, doc?.peaksBalance ?? 0);
+      throw new BadRequestException(
+        `Insufficient Peaks balance (have ${balance}, need ${amount})`,
+      );
+    }
+  }
+
+  async buyAndClaimWave(
+    buyerUserId: string,
+    jobId: string,
+    quantity = 1,
+  ): Promise<{
+    jobId: string;
+    claimStatus: 'claimed';
+    claimedAt: string;
+    peaksCharged: number;
+    discountPercent: number;
+  }> {
+    const ctx = await this.loadCommercialContext(jobId);
+    const { totalPeaks, discountPercent } = computeBuyClaimPeaks(
+      ctx.settings,
+      quantity,
+    );
+    const claimedAt = new Date().toISOString();
+    const unlockedAt = claimedAt;
+    const sessionId = ctx.session.sessionId;
+
+    const mongoSession = await this.connection.startSession();
+    mongoSession.startTransaction();
+    try {
+      await this.debitPeaks(buyerUserId, totalPeaks, mongoSession);
+
+      await this.videoJobModel
+        .updateOne(
+          { jobId },
+          {
+            $set: {
+              claimStatus: 'claimed',
+              claimedAt,
+              claimedByUserId: buyerUserId,
+              videoUnlockedForUserId: buyerUserId,
+              videoUnlockedByUserId: buyerUserId,
+              videoUnlockedAt: unlockedAt,
+            },
+          },
+          { session: mongoSession },
+        )
+        .exec();
+
+      await this.waveUnlockPurchaseModel.create(
+        [
+          {
+            jobId,
+            sessionId,
+            buyerUserId,
+            beneficiaryUserId: buyerUserId,
+            type: 'buy_claim',
+            peaksCharged: totalPeaks,
+            discountPercent,
+            createdAt: unlockedAt,
+          },
+        ],
+        { session: mongoSession },
+      );
+
+      await mongoSession.commitTransaction();
+    } catch (err) {
+      await mongoSession.abortTransaction();
+      throw err;
+    } finally {
+      void mongoSession.endSession();
+    }
+
+    return {
+      jobId,
+      claimStatus: 'claimed',
+      claimedAt,
+      peaksCharged: totalPeaks,
+      discountPercent,
+    };
+  }
+
+  async sponsorWaveUnlock(
+    sponsorUserId: string,
+    jobId: string,
+  ): Promise<{
+    jobId: string;
+    peaksCharged: number;
+    beneficiaryUserId: string;
+  }> {
+    const ctx = await this.loadCommercialContext(jobId);
+    if (ctx.job.claimStatus !== 'claimed') {
+      throw new BadRequestException('Wave must be claimed before it can be sponsored');
+    }
+    const beneficiary = ctx.job.claimedByUserId?.trim();
+    if (!beneficiary) {
+      throw new BadRequestException('Wave has no claimant to sponsor');
+    }
+    if (ctx.job.videoUnlockedForUserId?.trim()) {
+      throw new ConflictException('This wave is already unlocked');
+    }
+    const peaksCharged = computeSponsorPeaks(ctx.settings, 1);
+    const unlockedAt = new Date().toISOString();
+    const sessionId = ctx.session.sessionId;
+
+    const mongoSession = await this.connection.startSession();
+    mongoSession.startTransaction();
+    try {
+      await this.debitPeaks(sponsorUserId, peaksCharged, mongoSession);
+
+      const updated = await this.videoJobModel
+        .findOneAndUpdate(
+          {
+            jobId,
+            claimStatus: 'claimed',
+            videoUnlockedForUserId: null,
+          },
+          {
+            $set: {
+              videoUnlockedForUserId: beneficiary,
+              videoUnlockedByUserId: sponsorUserId,
+              videoUnlockedAt: unlockedAt,
+            },
+          },
+          { session: mongoSession, returnDocument: 'after' },
+        )
+        .lean()
+        .exec();
+
+      if (!updated) {
+        throw new ConflictException('This wave is already unlocked');
+      }
+
+      await this.waveUnlockPurchaseModel.create(
+        [
+          {
+            jobId,
+            sessionId,
+            buyerUserId: sponsorUserId,
+            beneficiaryUserId: beneficiary,
+            type: 'sponsor',
+            peaksCharged,
+            discountPercent: 0,
+            createdAt: unlockedAt,
+          },
+        ],
+        { session: mongoSession },
+      );
+
+      await mongoSession.commitTransaction();
+    } catch (err) {
+      await mongoSession.abortTransaction();
+      throw err;
+    } finally {
+      void mongoSession.endSession();
+    }
+
+    return { jobId, peaksCharged, beneficiaryUserId: beneficiary };
+  }
+
+}

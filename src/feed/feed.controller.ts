@@ -1,4 +1,5 @@
 import {
+  Body,
   Controller,
   Get,
   HttpCode,
@@ -44,5 +45,25 @@ export class FeedController {
   @HttpCode(HttpStatus.OK)
   claimVideo(@AuthUserId() userId: string, @Param('jobId') jobId: string) {
     return this.feed.claimVideoWave(userId, jobId);
+  }
+
+  @Post('discover/videos/:jobId/buy-claim')
+  @HttpCode(HttpStatus.OK)
+  buyClaimVideo(
+    @AuthUserId() userId: string,
+    @Param('jobId') jobId: string,
+    @Body() body?: { quantity?: number },
+  ) {
+    const quantity =
+      typeof body?.quantity === 'number' && body.quantity >= 1
+        ? Math.floor(body.quantity)
+        : 1;
+    return this.feed.buyAndClaimVideoWave(userId, jobId, quantity);
+  }
+
+  @Post('discover/videos/:jobId/sponsor')
+  @HttpCode(HttpStatus.OK)
+  sponsorVideo(@AuthUserId() userId: string, @Param('jobId') jobId: string) {
+    return this.feed.sponsorVideoWave(userId, jobId);
   }
 }

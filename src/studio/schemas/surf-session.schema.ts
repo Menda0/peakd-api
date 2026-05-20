@@ -1,5 +1,9 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument } from 'mongoose';
+import {
+  CommercialSettingsEmbed,
+  CommercialSettingsEmbedSchema,
+} from '../../commercial/schemas/commercial-settings.embed';
 
 export type SurfSessionDocument = HydratedDocument<SurfSession>;
 
@@ -86,6 +90,14 @@ export class SurfSession {
   /** Unguessable token for public session viewer (anyone with link). */
   @Prop({ type: String, default: null, sparse: true, unique: true, index: true })
   shareToken: string | null;
+
+  /** Commercial session: feed shows snapshot carousel; waves unlock via Peaks. */
+  @Prop({ type: Boolean, default: false, index: true })
+  isCommercial: boolean;
+
+  /** Per-session pricing override; null inherits partner profile defaults. */
+  @Prop({ type: CommercialSettingsEmbedSchema, default: null })
+  commercialSettings: CommercialSettingsEmbed | null;
 }
 
 export const SurfSessionSchema = SchemaFactory.createForClass(SurfSession);

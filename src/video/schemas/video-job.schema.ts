@@ -79,6 +79,17 @@ export class VideoJob {
   /** Auth0 subject of the surfer who claimed a partner studio clip. */
   @Prop({ type: String, default: null, index: true })
   claimedByUserId: string | null;
+
+  /** Auth0 subject who may watch the full processed video (commercial unlock). */
+  @Prop({ type: String, default: null, index: true })
+  videoUnlockedForUserId: string | null;
+
+  /** Auth0 subject who paid Peaks to unlock (buyer or sponsor). */
+  @Prop({ type: String, default: null })
+  videoUnlockedByUserId: string | null;
+
+  @Prop({ type: String, default: null })
+  videoUnlockedAt: string | null;
 }
 
 export const VideoJobSchema = SchemaFactory.createForClass(VideoJob);
