@@ -8,6 +8,7 @@ import { PublicSharedSessionController } from './public-shared-session.controlle
 import { SessionExportService } from './session-export.service';
 import { SharedSessionService } from './shared-session.service';
 import { StudioService } from './studio.service';
+import { SurfSessionIndexesService } from './surf-session-indexes.service';
 import { Auth0JwtGuard } from '../auth/auth0-jwt.guard';
 import { S3Module } from '../s3/s3.module';
 import { VideoJob, VideoJobSchema } from '../video/schemas/video-job.schema';
@@ -37,6 +38,7 @@ import {
     StudioService,
     SharedSessionService,
     SessionExportService,
+    SurfSessionIndexesService,
     Auth0JwtGuard,
   ],
   exports: [StudioService],

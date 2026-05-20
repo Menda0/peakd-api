@@ -87,9 +87,9 @@ export class SurfSession {
   @Prop({ type: String, default: null })
   rawExportExpiresAt: string | null;
 
-  /** Unguessable token for public session viewer (anyone with link). */
-  @Prop({ type: String, default: null, sparse: true, unique: true, index: true })
-  shareToken: string | null;
+  /** Unguessable token for public session viewer (set when share is enabled). */
+  @Prop({ type: String, required: false })
+  shareToken?: string;
 
   /** Commercial session: feed shows snapshot carousel; waves unlock via Peaks. */
   @Prop({ type: Boolean, default: false, index: true })
@@ -103,3 +103,4 @@ export class SurfSession {
 export const SurfSessionSchema = SchemaFactory.createForClass(SurfSession);
 
 SurfSessionSchema.index({ userId: 1, createdAt: -1 });
+SurfSessionSchema.index({ shareToken: 1 }, { unique: true, sparse: true });
