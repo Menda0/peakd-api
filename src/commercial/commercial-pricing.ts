@@ -128,3 +128,26 @@ export function computeSponsorPeaks(
   const q = Math.max(1, Math.floor(quantity));
   return settings.videoPricePeaks * q;
 }
+
+export const COMMUNITY_FEE_PERCENT = 20;
+
+export type CheckoutPeaksBreakdown = {
+  basePeaks: number;
+  communityFeePeaks: number;
+  totalPeaks: number;
+  communityFeePercent: number;
+};
+
+export function computeCheckoutTotal(basePeaks: number): CheckoutPeaksBreakdown {
+  const base = Math.max(0, Math.round(basePeaks));
+  const communityFeePeaks = Math.max(
+    1,
+    Math.round((base * COMMUNITY_FEE_PERCENT) / 100),
+  );
+  return {
+    basePeaks: base,
+    communityFeePeaks,
+    totalPeaks: base + communityFeePeaks,
+    communityFeePercent: COMMUNITY_FEE_PERCENT,
+  };
+}

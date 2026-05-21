@@ -125,10 +125,10 @@ describe('CommercialWaveService', () => {
 
     const result = await service.buyAndClaimWave(buyerUserId, jobId, 1);
 
-    expect(result.peaksCharged).toBe(50);
+    expect(result.peaksCharged).toBe(60);
     expect(userProfileModel.findOneAndUpdate).toHaveBeenCalledWith(
-      { userId: buyerUserId, peaksBalance: { $gte: 50 } },
-      { $inc: { peaksBalance: -50 } },
+      { userId: buyerUserId, peaksBalance: { $gte: 60 } },
+      { $inc: { peaksBalance: -60 } },
       expect.objectContaining({ session: mongoSession }),
     );
     expect(videoJobModel.updateOne).toHaveBeenCalledWith(
@@ -167,7 +167,7 @@ describe('CommercialWaveService', () => {
     const result = await service.sponsorWaveUnlock(buyerUserId, jobId);
 
     expect(result.beneficiaryUserId).toBe(priorClaimant);
-    expect(result.peaksCharged).toBe(50);
+    expect(result.peaksCharged).toBe(60);
     expect(videoJobModel.findOneAndUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
         jobId,

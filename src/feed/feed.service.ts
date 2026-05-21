@@ -20,7 +20,9 @@ import { UserProfile } from '../users/schemas/user-profile.schema';
 import { CommercialWaveService } from '../commercial/commercial-wave.service';
 import {
   computeBuyClaimPeaks,
+  computeCheckoutTotal,
   computeSponsorPeaks,
+  COMMUNITY_FEE_PERCENT,
   resolveEffectiveCommercialSettings,
 } from '../commercial/commercial-pricing';
 import type { CommercialSettings } from '../commercial/commercial-settings.types';
@@ -29,8 +31,6 @@ import type { VideoJobStatus } from '../video/schemas/video-job.schema';
 import type { VideoClaimStatus } from '../video/schemas/video-job.schema';
 import {
   buildCursorMatchFilter,
-  buildFeedSortTierExpression,
-  buildRelevanceTierExpression,
   decodeDiscoverCursor,
   encodeDiscoverCursor,
   type DiscoverCursor,
@@ -98,6 +98,46 @@ export interface SurferProfileDto {
   regionName: string | null;
 }
 
+export interface CheckoutPeaksBreakdownDto {
+  basePeaks: number;
+  communityFeePeaks: number;
+  totalPeaks: number;
+  communityFeePercent: number;
+}
+
+export interface WaveCheckoutSessionWaveDto {
+  jobId: string;
+  originalFilename: string;
+  thumbnailUrl: string | null;
+  isCurrent: boolean;
+  canBuyClaim: boolean;
+  canSponsor: boolean;
+  buyClaimTotalPeaks: number | null;
+  sponsorTotalPeaks: number | null;
+}
+
+export interface WaveCheckoutContextDto {
+  jobId: string;
+  sessionId: string;
+  shareToken: string | null;
+  location: DiscoverFeedLocationDto;
+  sessionSummary: DiscoverFeedSessionDto;
+  partner: {
+    partnerName: string;
+    avatarUrl: string | null;
+    descriptionMarkdown: string | null;
+  };
+  commercialSettings: CommercialSettings;
+  communityFeePercent: number;
+  canClaim: boolean;
+  canBuyClaim: boolean;
+  canSponsor: boolean;
+  buyClaim: CheckoutPeaksBreakdownDto;
+  sponsor: CheckoutPeaksBreakdownDto;
+  surfer: SurferProfileDto | null;
+  sessionWaves: WaveCheckoutSessionWaveDto[];
+}
+
 export interface FilmedByDto {
   userId: string;
   displayName: string | null;
@@ -137,8 +177,6 @@ type AggregatedRow = {
   createdAt: string;
   processedKey?: string;
   snapshotKeys?: string[];
-  relevanceTier: number;
-  feedSortTier: number;
   status: VideoJobStatus;
   uploadSource: 'studio' | 'personal';
   claimStatus: VideoClaimStatus;
@@ -275,9 +313,11 @@ export class FeedService {
     const videoUnlockedByViewer = unlockedFor === viewerUserId;
     const wavePricePeaks = settings?.videoPricePeaks ?? null;
     const buyClaimPricePeaks = settings
-      ? computeBuyClaimPeaks(settings, 1).totalPeaks
+      ? computeCheckoutTotal(computeBuyClaimPeaks(settings, 1).totalPeaks).totalPeaks
       : null;
-    const sponsorPricePeaks = settings ? computeSponsorPeaks(settings, 1) : null;
+    const sponsorPricePeaks = settings
+      ? computeCheckoutTotal(computeSponsorPeaks(settings, 1)).totalPeaks
+      : null;
     const canClaim =
       claimStatus === 'none' && !unlockedFor;
     const canBuyClaim = Boolean(settings && buyClaimPricePeaks != null);
@@ -330,6 +370,134 @@ export class FeedService {
     beneficiaryUserId: string;
   }> {
     return this.commercialWave.sponsorWaveUnlock(sponsorUserId, jobId);
+  }
+
+  async getWaveCheckoutContext(
+    viewerUserId: string,
+    jobId: string,
+  ): Promise<WaveCheckoutContextDto> {
+    const doc = await this.videoJobModel.findOne({ jobId }).lean().exec();
+    if (!doc) {
+      throw new NotFoundException(`Video job not found: ${jobId}`);
+    }
+    const sessionId = doc.surfSessionId?.trim();
+    if (!sessionId) {
+      throw new BadRequestException('Video is not part of a commercial session');
+    }
+    const session = await this.surfSessionModel.findOne({ sessionId }).lean().exec();
+    if (!session || session.isCommercial !== true) {
+      throw new BadRequestException('Session is not commercial');
+    }
+    const [partnerProfile, region, spot, authorProfile] = await Promise.all([
+      this.partnerProfileModel.findOne({ userId: doc.userId }).lean().exec(),
+      this.regionModel.findOne({ regionId: session.regionId }).lean().exec(),
+      this.spotModel.findOne({ spotId: session.spotId }).lean().exec(),
+      this.userProfileModel.findOne({ userId: doc.userId }).lean().exec(),
+    ]);
+    const settings = resolveEffectiveCommercialSettings(
+      session,
+      partnerProfile as { commercialSettings?: CommercialSettings | null } | null,
+    );
+    if (!settings) {
+      throw new BadRequestException('Commercial pricing is not configured');
+    }
+    const extras = this.commercialExtras(
+      session,
+      partnerProfile,
+      doc,
+      viewerUserId,
+    );
+    const buyClaimBase = computeBuyClaimPeaks(settings, 1).totalPeaks;
+    const sponsorBase = computeSponsorPeaks(settings, 1);
+    const buyClaim = computeCheckoutTotal(buyClaimBase);
+    const sponsor = computeCheckoutTotal(sponsorBase);
+
+    const countryCode = session.countryCode;
+    const isUndisclosed =
+      isUndisclosedRegionId(session.regionId, countryCode) ||
+      isUndisclosedSpotId(session.spotId, countryCode);
+    const regionName =
+      region?.name?.trim() ||
+      (isUndisclosedRegionId(session.regionId, countryCode) ? 'Undisclosed' : 'Unknown');
+    const spotName = isUndisclosed ? null : spot?.name?.trim() || null;
+
+    const partnerName =
+      partnerProfile?.partnerName?.trim() ||
+      authorProfile?.displayName?.trim() ||
+      'Partner';
+    const partnerAvatarUrl = await this.resolveAvatarUrl(
+      partnerProfile?.avatarKey?.trim() || authorProfile?.avatarKey?.trim() || null,
+    );
+
+    const sessionJobs = await this.videoJobModel
+      .find({
+        surfSessionId: sessionId,
+        status: 'completed',
+        discoverPublishedAt: { $type: 'string' },
+      })
+      .sort({ createdAt: -1 })
+      .lean()
+      .exec();
+
+    const sessionWaves: WaveCheckoutSessionWaveDto[] = [];
+    for (const row of sessionJobs) {
+      const rowExtras = this.commercialExtras(session, partnerProfile, row, viewerUserId);
+      if (rowExtras.videoUnlockedByViewer) continue;
+      const thumbKey = row.snapshotKeys?.[0];
+      let thumbnailUrl: string | null = null;
+      if (thumbKey) {
+        thumbnailUrl = await this.s3.presignedGetUrl(thumbKey);
+      }
+      const rowBuyBase = computeBuyClaimPeaks(settings, 1).totalPeaks;
+      const rowSponsorBase = computeSponsorPeaks(settings, 1);
+      sessionWaves.push({
+        jobId: row.jobId,
+        originalFilename: row.originalFilename ?? 'video',
+        thumbnailUrl,
+        isCurrent: row.jobId === jobId,
+        canBuyClaim: rowExtras.canBuyClaim,
+        canSponsor: rowExtras.canSponsor,
+        buyClaimTotalPeaks: rowExtras.canBuyClaim
+          ? computeCheckoutTotal(rowBuyBase).totalPeaks
+          : null,
+        sponsorTotalPeaks: rowExtras.canSponsor
+          ? computeCheckoutTotal(rowSponsorBase).totalPeaks
+          : null,
+      });
+    }
+
+    const surfer = await this.resolveFeedSurfer(doc);
+    const shareToken =
+      typeof session.shareToken === 'string' && session.shareToken.trim()
+        ? session.shareToken.trim()
+        : null;
+
+    return {
+      jobId,
+      sessionId,
+      shareToken,
+      location: {
+        countryCode,
+        regionName,
+        spotName,
+        isUndisclosed,
+      },
+      sessionSummary: this.sessionToDto(session),
+      partner: {
+        partnerName,
+        avatarUrl: partnerAvatarUrl,
+        descriptionMarkdown: partnerProfile?.descriptionMarkdown ?? null,
+      },
+      commercialSettings: settings,
+      communityFeePercent: COMMUNITY_FEE_PERCENT,
+      canClaim: extras.canClaim,
+      canBuyClaim: extras.canBuyClaim,
+      canSponsor: extras.canSponsor,
+      buyClaim,
+      sponsor,
+      surfer,
+      sessionWaves,
+    };
   }
 
   async publishVideoToDiscover(
@@ -637,20 +805,6 @@ export class FeedService {
       }
     }
 
-    const profile = await this.userProfileModel
-      .findOne({ userId: viewerUserId })
-      .lean()
-      .exec();
-
-    const viewerCountryCode =
-      profile?.countryCode?.trim().toUpperCase() || null;
-    const viewerHomeRegionId = profile?.homeRegionId?.trim() || null;
-
-    const pending =
-      cursor === null
-        ? await this.listViewerProcessingPersonal(viewerUserId)
-        : [];
-
     const pipeline: PipelineStage[] = [
       {
         $match: {
@@ -703,22 +857,6 @@ export class FeedService {
       },
       {
         $addFields: {
-          relevanceTier: buildRelevanceTierExpression(
-            viewerCountryCode,
-            viewerHomeRegionId,
-          ),
-        },
-      },
-      {
-        $addFields: {
-          feedSortTier: buildFeedSortTierExpression(
-            viewerUserId,
-            '$relevanceTier',
-          ),
-        },
-      },
-      {
-        $addFields: {
           surferUserId: {
             $switch: {
               branches: [
@@ -745,7 +883,7 @@ export class FeedService {
     }
 
     pipeline.push(
-      { $sort: { feedSortTier: 1, createdAt: -1, jobId: -1 } },
+      { $sort: { createdAt: -1, jobId: -1 } },
       { $limit: limit + 1 },
     );
 
@@ -756,22 +894,35 @@ export class FeedService {
     const hasMore = rows.length > limit;
     const pageRows = hasMore ? rows.slice(0, limit) : rows;
 
-    const items: DiscoverFeedItemDto[] = [...pending];
+    const discoverItems: DiscoverFeedItemDto[] = [];
     for (const row of pageRows) {
-      items.push(await this.rowToDto(row, viewerUserId));
+      discoverItems.push(await this.rowToDto(row, viewerUserId));
+    }
+
+    let items = discoverItems;
+    let mergedHasMore = hasMore;
+
+    if (cursor === null) {
+      const pending = await this.listViewerProcessingPersonal(viewerUserId);
+      const merged = [...pending, ...discoverItems].sort((a, b) => {
+        const t = b.createdAt.localeCompare(a.createdAt);
+        if (t !== 0) return t;
+        return b.jobId.localeCompare(a.jobId);
+      });
+      mergedHasMore = merged.length > limit || hasMore;
+      items = merged.slice(0, limit);
     }
 
     let nextCursor: string | null = null;
-    if (hasMore && pageRows.length > 0) {
-      const last = pageRows[pageRows.length - 1]!;
+    if (mergedHasMore && discoverItems.length > 0) {
+      const lastDiscover = pageRows[pageRows.length - 1]!;
       nextCursor = encodeDiscoverCursor({
-        tier: last.feedSortTier,
-        createdAt: last.createdAt,
-        jobId: last.jobId,
+        createdAt: lastDiscover.createdAt,
+        jobId: lastDiscover.jobId,
       });
     }
 
-    return { items, nextCursor, hasMore };
+    return { items, nextCursor, hasMore: mergedHasMore };
   }
 
   private sessionToDto(session: {

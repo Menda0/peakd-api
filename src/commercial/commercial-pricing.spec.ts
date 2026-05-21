@@ -1,5 +1,6 @@
 import {
   computeBuyClaimPeaks,
+  computeCheckoutTotal,
   computeSponsorPeaks,
   resolveEffectiveCommercialSettings,
   volumeDiscountPercent,
@@ -49,5 +50,14 @@ describe('commercial-pricing', () => {
   it('charges full price per wave for sponsor without tiers', () => {
     expect(computeSponsorPeaks(settings, 1)).toBe(100);
     expect(computeSponsorPeaks(settings, 2)).toBe(200);
+  });
+
+  it('adds 20% community fee on checkout total', () => {
+    expect(computeCheckoutTotal(50)).toEqual({
+      basePeaks: 50,
+      communityFeePeaks: 10,
+      totalPeaks: 60,
+      communityFeePercent: 20,
+    });
   });
 });

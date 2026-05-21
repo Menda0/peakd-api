@@ -28,7 +28,6 @@ export function computeRelevanceTier(
 }
 
 export type DiscoverCursor = {
-  tier: number;
   createdAt: string;
   jobId: string;
 };
@@ -43,14 +42,12 @@ export function decodeDiscoverCursor(raw: string): DiscoverCursor | null {
       Buffer.from(raw, 'base64url').toString('utf8'),
     ) as Record<string, unknown>;
     if (
-      typeof parsed.tier === 'number' &&
       typeof parsed.createdAt === 'string' &&
       typeof parsed.jobId === 'string' &&
       parsed.createdAt.trim() &&
       parsed.jobId.trim()
     ) {
       return {
-        tier: parsed.tier,
         createdAt: parsed.createdAt,
         jobId: parsed.jobId,
       };
@@ -66,13 +63,8 @@ export function buildCursorMatchFilter(
 ): Record<string, unknown> {
   return {
     $or: [
-      { feedSortTier: { $gt: cursor.tier } },
+      { createdAt: { $lt: cursor.createdAt } },
       {
-        feedSortTier: cursor.tier,
-        createdAt: { $lt: cursor.createdAt },
-      },
-      {
-        feedSortTier: cursor.tier,
         createdAt: cursor.createdAt,
         jobId: { $lt: cursor.jobId },
       },

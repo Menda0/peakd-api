@@ -12,6 +12,7 @@ import { UserProfile } from '../users/schemas/user-profile.schema';
 import { VideoJob } from '../video/schemas/video-job.schema';
 import {
   computeBuyClaimPeaks,
+  computeCheckoutTotal,
   computeSponsorPeaks,
   resolveEffectiveCommercialSettings,
 } from './commercial-pricing';
@@ -138,10 +139,11 @@ export class CommercialWaveService {
     discountPercent: number;
   }> {
     const ctx = await this.loadCommercialContext(jobId);
-    const { totalPeaks, discountPercent } = computeBuyClaimPeaks(
+    const { totalPeaks: basePeaks, discountPercent } = computeBuyClaimPeaks(
       ctx.settings,
       quantity,
     );
+    const { totalPeaks } = computeCheckoutTotal(basePeaks);
     const claimedAt = new Date().toISOString();
     const unlockedAt = claimedAt;
     const sessionId = ctx.session.sessionId;
@@ -220,7 +222,8 @@ export class CommercialWaveService {
     if (ctx.job.videoUnlockedForUserId?.trim()) {
       throw new ConflictException('This wave is already unlocked');
     }
-    const peaksCharged = computeSponsorPeaks(ctx.settings, 1);
+    const sponsorBase = computeSponsorPeaks(ctx.settings, 1);
+    const { totalPeaks: peaksCharged } = computeCheckoutTotal(sponsorBase);
     const unlockedAt = new Date().toISOString();
     const sessionId = ctx.session.sessionId;
 

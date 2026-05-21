@@ -66,4 +66,12 @@ export class FeedController {
   sponsorVideo(@AuthUserId() userId: string, @Param('jobId') jobId: string) {
     return this.feed.sponsorVideoWave(userId, jobId);
   }
+
+  @Get('discover/videos/:jobId/checkout')
+  getWaveCheckout(
+    @AuthUserId() userId: string,
+    @Param('jobId') jobId: string,
+  ) {
+    return this.feed.getWaveCheckoutContext(userId, jobId);
+  }
 }
