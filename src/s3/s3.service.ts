@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
+  DeleteObjectCommand,
+  DeleteObjectsCommand,
   GetObjectCommand,
   ListObjectsV2Command,
   PutObjectCommand,
@@ -113,12 +115,24 @@ export class S3Service {
 
   /** Lists object keys under prefix (paginated). */
   async listKeysWithPrefix(prefix: string): Promise<string[]> {
+    return this.listKeysWithPrefixInBucket(this.bucket, prefix);
+  }
+
+  /** Lists object keys under prefix in the raw retention bucket. */
+  async listKeysWithPrefixRaw(prefix: string): Promise<string[]> {
+    return this.listKeysWithPrefixInBucket(this.rawBucket, prefix);
+  }
+
+  private async listKeysWithPrefixInBucket(
+    bucket: string,
+    prefix: string,
+  ): Promise<string[]> {
     const keys: string[] = [];
     let continuationToken: string | undefined;
     do {
       const page = await this.client.send(
         new ListObjectsV2Command({
-          Bucket: this.bucket,
+          Bucket: bucket,
           Prefix: prefix,
           ContinuationToken: continuationToken,
         }),
@@ -133,6 +147,46 @@ export class S3Service {
         : undefined;
     } while (continuationToken);
     return keys;
+  }
+
+  async deleteObject(key: string, bucket = this.bucket): Promise<void> {
+    await this.client.send(
+      new DeleteObjectCommand({
+        Bucket: bucket,
+        Key: key,
+      }),
+    );
+  }
+
+  async deleteObjects(keys: string[], bucket = this.bucket): Promise<void> {
+    if (keys.length === 0) {
+      return;
+    }
+    const chunkSize = 1000;
+    for (let i = 0; i < keys.length; i += chunkSize) {
+      const chunk = keys.slice(i, i + chunkSize);
+      await this.client.send(
+        new DeleteObjectsCommand({
+          Bucket: bucket,
+          Delete: {
+            Objects: chunk.map((Key) => ({ Key })),
+            Quiet: true,
+          },
+        }),
+      );
+    }
+  }
+
+  /** Deletes all objects under `prefix` in the processed bucket. */
+  async deletePrefix(prefix: string): Promise<void> {
+    const keys = await this.listKeysWithPrefix(prefix);
+    await this.deleteObjects(keys, this.bucket);
+  }
+
+  /** Deletes all objects under `prefix` in the raw retention bucket. */
+  async deletePrefixRaw(prefix: string): Promise<void> {
+    const keys = await this.listKeysWithPrefixRaw(prefix);
+    await this.deleteObjects(keys, this.rawBucket);
   }
 
   async downloadToFile(key: string, destPath: string): Promise<void> {

@@ -1,8 +1,16 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { validate as uuidValidate, version as uuidVersion } from 'uuid';
 import { S3Service } from '../s3/s3.service';
+import { StudioService } from '../studio/studio.service';
+import {
+  WaveUnlockPurchase,
+} from '../commercial/schemas/wave-unlock-purchase.schema';
 import { VideoJob } from './schemas/video-job.schema';
 import type { VideoJobStatus } from './schemas/video-job.schema';
 
@@ -51,8 +59,11 @@ function normalizeJobStatus(doc: {
 export class VideoRegistryService {
   constructor(
     private readonly s3: S3Service,
+    private readonly studio: StudioService,
     @InjectModel(VideoJob.name)
     private readonly videoJobModel: Model<VideoJob>,
+    @InjectModel(WaveUnlockPurchase.name)
+    private readonly waveUnlockPurchaseModel: Model<WaveUnlockPurchase>,
   ) {}
 
   async listJobs(
@@ -171,5 +182,45 @@ export class VideoRegistryService {
       snapshots,
       surfSessionId: doc.surfSessionId ?? null,
     };
+  }
+
+  async deleteJob(userId: string, jobId: string): Promise<{ jobId: string }> {
+    const doc = await this.videoJobModel
+      .findOne({ jobId, userId })
+      .lean()
+      .exec();
+    if (!doc) {
+      throw new NotFoundException(`Video job not found: ${jobId}`);
+    }
+
+    const sessionId =
+      typeof doc.surfSessionId === 'string' && doc.surfSessionId.trim()
+        ? doc.surfSessionId.trim()
+        : null;
+    if (sessionId) {
+      await this.studio.assertSessionOpenForUpload(userId, sessionId);
+    }
+
+    if (doc.discoverPublishedAt) {
+      throw new BadRequestException(
+        'Cannot remove a wave that is on the discover feed',
+      );
+    }
+    if (doc.claimedByUserId || doc.videoUnlockedForUserId) {
+      throw new BadRequestException(
+        'Cannot remove a wave that has been claimed or unlocked',
+      );
+    }
+
+    const prefix = `videos/${userId}/${jobId}/`;
+    await Promise.all([
+      this.s3.deletePrefix(prefix),
+      this.s3.deletePrefixRaw(prefix),
+    ]);
+
+    await this.waveUnlockPurchaseModel.deleteMany({ jobId }).exec();
+    await this.videoJobModel.deleteOne({ jobId, userId }).exec();
+
+    return { jobId };
   }
 }

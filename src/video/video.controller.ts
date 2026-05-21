@@ -1,5 +1,6 @@
 import {
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -41,6 +42,15 @@ export class VideoController {
     @Param('jobId', new ParseUUIDPipe({ version: '4' })) jobId: string,
   ) {
     return this.videoRegistry.getJob(userId, jobId);
+  }
+
+  @Delete(':jobId')
+  @HttpCode(HttpStatus.OK)
+  deleteJob(
+    @AuthUserId() userId: string,
+    @Param('jobId', new ParseUUIDPipe({ version: '4' })) jobId: string,
+  ) {
+    return this.videoRegistry.deleteJob(userId, jobId);
   }
 
   @Post('process')
