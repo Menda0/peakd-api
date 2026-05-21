@@ -73,7 +73,7 @@ export class SessionExportService {
     const session = await this.studio.getSessionForExport(userId, sessionId);
 
     if (session.status === 'closed') {
-      throw new BadRequestException('Session is already closed');
+      throw new BadRequestException('Session is already published');
     }
 
     const processingCount = await this.videoJobModel
@@ -86,7 +86,7 @@ export class SessionExportService {
 
     if (processingCount > 0) {
       throw new ConflictException(
-        'Cannot close session while videos are still processing',
+        'Cannot publish session while videos are still processing',
       );
     }
 

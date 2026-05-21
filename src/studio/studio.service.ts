@@ -395,7 +395,7 @@ export class StudioService {
     }
     if (session.status !== 'closed') {
       throw new BadRequestException(
-        'Close the session before sharing',
+        'Publish the session before sharing',
       );
     }
     const completedCount = await this.countCompletedSessionVideos(
@@ -888,7 +888,7 @@ export class StudioService {
       throw new NotFoundException('Session not found');
     }
     if (existing.status === 'closed') {
-      throw new BadRequestException('Cannot edit a closed session');
+      throw new BadRequestException('Cannot edit a published session');
     }
     if (existing.sessionKind === 'personal' && body.isCommercial === true) {
       throw new BadRequestException('Personal sessions cannot be commercial');
@@ -1096,7 +1096,7 @@ export class StudioService {
       throw new ForbiddenException('Invalid or unknown surf session');
     }
     if (doc.status === 'closed') {
-      throw new ForbiddenException('This surf session is closed');
+      throw new ForbiddenException('This surf session is published');
     }
   }
 

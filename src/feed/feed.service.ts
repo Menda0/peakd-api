@@ -364,7 +364,7 @@ export class FeedService {
     }
     if (session.status !== 'closed') {
       throw new BadRequestException(
-        'Close the surf session before publishing to discover',
+        'Publish the surf session before waves appear on Discover',
       );
     }
 
