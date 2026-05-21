@@ -1,4 +1,5 @@
 import {
+  allocateBuyClaimLineBreakdowns,
   computeBuyClaimPeaks,
   computeCheckoutTotal,
   computeSponsorPeaks,
@@ -50,6 +51,17 @@ describe('commercial-pricing', () => {
   it('charges full price per wave for sponsor without tiers', () => {
     expect(computeSponsorPeaks(settings, 1)).toBe(100);
     expect(computeSponsorPeaks(settings, 2)).toBe(200);
+  });
+
+  it('allocates per-wave lines that sum to session buy-claim total', () => {
+    const lines = allocateBuyClaimLineBreakdowns(settings, 3);
+    expect(lines).toHaveLength(3);
+    expect(lines[0]?.discountPercent).toBe(10);
+    expect(lines.every((l) => l.listPricePeaks === 100)).toBe(true);
+    const baseSum = lines.reduce((s, l) => s + l.basePeaks, 0);
+    expect(baseSum).toBe(270);
+    const totalSum = lines.reduce((s, l) => s + l.totalPeaks, 0);
+    expect(totalSum).toBeGreaterThan(baseSum);
   });
 
   it('adds 20% community fee on checkout total', () => {

@@ -74,4 +74,38 @@ export class FeedController {
   ) {
     return this.feed.getWaveCheckoutContext(userId, jobId);
   }
+
+  @Post('discover/cart/quote')
+  @HttpCode(HttpStatus.OK)
+  quoteUnlockCart(
+    @AuthUserId() userId: string,
+    @Body() body: { items?: { jobId: string; intent: string }[] },
+  ) {
+    const items = Array.isArray(body?.items)
+      ? body.items
+          .filter(
+            (row) =>
+              row &&
+              typeof row.jobId === 'string' &&
+              (row.intent === 'buy_claim' || row.intent === 'sponsor'),
+          )
+          .map((row) => ({
+            jobId: row.jobId,
+            intent: row.intent as 'buy_claim' | 'sponsor',
+          }))
+      : [];
+    return this.feed.quoteUnlockCart(userId, items);
+  }
+
+  @Post('discover/cart/buy-claim-batch')
+  @HttpCode(HttpStatus.OK)
+  buyClaimCartBatch(
+    @AuthUserId() userId: string,
+    @Body() body: { jobIds?: string[] },
+  ) {
+    const jobIds = Array.isArray(body?.jobIds)
+      ? body.jobIds.filter((id): id is string => typeof id === 'string')
+      : [];
+    return this.feed.buyAndClaimVideoWaves(userId, jobIds);
+  }
 }

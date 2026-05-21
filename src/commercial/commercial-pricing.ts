@@ -173,3 +173,39 @@ export function checkoutBreakdownWithDiscount(
     discountPeaksSaved: Math.max(0, list - base),
   };
 }
+
+/** Split a total into `parts` whole amounts that sum exactly to `total`. */
+export function splitIntegerTotal(total: number, parts: number): number[] {
+  const n = Math.max(1, Math.floor(parts));
+  const sum = Math.max(0, Math.round(total));
+  const base = Math.floor(sum / n);
+  let remainder = sum - base * n;
+  const out: number[] = [];
+  for (let i = 0; i < n; i += 1) {
+    const extra = remainder > 0 ? 1 : 0;
+    if (remainder > 0) remainder -= 1;
+    out.push(base + extra);
+  }
+  return out;
+}
+
+/**
+ * Per-wave checkout lines for buy & claim when purchasing `waveCount` waves from the
+ * same session (volume discount applies to the batch count).
+ */
+export function allocateBuyClaimLineBreakdowns(
+  settings: CommercialSettings,
+  waveCount: number,
+): CheckoutBreakdownWithDiscount[] {
+  const q = Math.max(1, Math.floor(waveCount));
+  const { unitPricePeaks, discountPercent, totalPeaks: discountedBaseTotal } =
+    computeBuyClaimPeaks(settings, q);
+  const baseShares = splitIntegerTotal(discountedBaseTotal, q);
+  return baseShares.map((basePeaks) =>
+    checkoutBreakdownWithDiscount(
+      basePeaks,
+      unitPricePeaks,
+      discountPercent,
+    ),
+  );
+}

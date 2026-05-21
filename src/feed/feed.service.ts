@@ -19,6 +19,7 @@ import { PartnerProfile } from '../partner/schemas/partner-profile.schema';
 import { UserProfile } from '../users/schemas/user-profile.schema';
 import { CommercialWaveService } from '../commercial/commercial-wave.service';
 import {
+  allocateBuyClaimLineBreakdowns,
   checkoutBreakdownWithDiscount,
   computeBuyClaimPeaks,
   computeCheckoutTotal,
@@ -118,6 +119,34 @@ export interface WaveCheckoutSessionWaveDto {
   canSponsor: boolean;
   buyClaimTotalPeaks: number | null;
   sponsorTotalPeaks: number | null;
+}
+
+export type UnlockCartIntent = 'buy_claim' | 'sponsor';
+
+export interface UnlockCartQuoteRequestItem {
+  jobId: string;
+  intent: UnlockCartIntent;
+}
+
+export interface UnlockCartQuoteLineDto {
+  jobId: string;
+  intent: UnlockCartIntent;
+  videoName: string;
+  sessionId: string;
+  sessionLabel: string;
+  thumbnailUrl: string | null;
+  listPricePeaks: number;
+  discountPercent: number;
+  discountPeaksSaved: number;
+  basePeaks: number;
+  communityFeePeaks: number;
+  totalPeaks: number;
+  communityFeePercent: number;
+}
+
+export interface UnlockCartQuoteDto {
+  lines: UnlockCartQuoteLineDto[];
+  totalPeaks: number;
 }
 
 export interface WaveCheckoutContextDto {
@@ -342,6 +371,199 @@ export class FeedService {
       canBuyClaim,
       canSponsor,
     };
+  }
+
+  private formatUnlockCartSessionLabel(
+    session: {
+      sessionDate: string;
+      sessionTime: string;
+      countryCode: string;
+      regionId: string;
+      spotId: string;
+    },
+    regionName: string,
+    spotName: string | null,
+    isUndisclosed: boolean,
+  ): string {
+    const place = isUndisclosed
+      ? regionName
+      : spotName
+        ? `${spotName}, ${regionName}`
+        : regionName;
+    return `${place} · ${session.sessionDate} · ${session.sessionTime}`;
+  }
+
+  async quoteUnlockCart(
+    _viewerUserId: string,
+    items: UnlockCartQuoteRequestItem[],
+  ): Promise<UnlockCartQuoteDto> {
+    if (!Array.isArray(items) || items.length === 0) {
+      return { lines: [], totalPeaks: 0 };
+    }
+
+    type SessionMeta = {
+      sessionLabel: string;
+      regionName: string;
+      spotName: string | null;
+      isUndisclosed: boolean;
+    };
+
+    type Loaded = {
+      jobId: string;
+      intent: UnlockCartIntent;
+      ctx: Awaited<ReturnType<CommercialWaveService['loadCommercialContext']>>;
+      videoName: string;
+      thumbnailUrl: string | null;
+      sessionMeta: SessionMeta;
+    };
+
+    const sessionMetaCache = new Map<string, SessionMeta>();
+    const loaded: Loaded[] = [];
+
+    for (const item of items) {
+      const jobId = item.jobId?.trim();
+      if (!jobId) continue;
+      const intent: UnlockCartIntent =
+        item.intent === 'sponsor' ? 'sponsor' : 'buy_claim';
+      const ctx = await this.commercialWave.loadCommercialContext(jobId);
+      const sessionId = ctx.session.sessionId;
+
+      let sessionMeta = sessionMetaCache.get(sessionId);
+      if (!sessionMeta) {
+        const fullSession = await this.surfSessionModel
+          .findOne({ sessionId })
+          .lean()
+          .exec();
+        if (!fullSession) {
+          throw new BadRequestException('Session not found');
+        }
+        const cc = fullSession.countryCode;
+        const isUndisclosed =
+          isUndisclosedRegionId(fullSession.regionId, cc) ||
+          isUndisclosedSpotId(fullSession.spotId, cc);
+        const region = await this.regionModel
+          .findOne({ regionId: fullSession.regionId })
+          .lean()
+          .exec();
+        const spot = isUndisclosed
+          ? null
+          : await this.spotModel.findOne({ spotId: fullSession.spotId }).lean().exec();
+        const regionName =
+          region?.name?.trim() ||
+          (isUndisclosedRegionId(fullSession.regionId, cc)
+            ? 'Undisclosed'
+            : 'Unknown');
+        const spotName = isUndisclosed ? null : spot?.name?.trim() || null;
+        sessionMeta = {
+          regionName,
+          spotName,
+          isUndisclosed,
+          sessionLabel: this.formatUnlockCartSessionLabel(
+            fullSession,
+            regionName,
+            spotName,
+            isUndisclosed,
+          ),
+        };
+        sessionMetaCache.set(sessionId, sessionMeta);
+      }
+
+      const doc = await this.videoJobModel.findOne({ jobId }).lean().exec();
+      let thumbnailUrl: string | null = null;
+      const thumbKey = doc?.snapshotKeys?.[0];
+      if (thumbKey) {
+        thumbnailUrl = await this.s3.presignedGetUrl(thumbKey);
+      }
+
+      loaded.push({
+        jobId,
+        intent,
+        ctx,
+        videoName: doc?.originalFilename ?? 'video',
+        thumbnailUrl,
+        sessionMeta,
+      });
+    }
+
+    const lines: UnlockCartQuoteLineDto[] = [];
+    const buyClaimBySession = new Map<string, Loaded[]>();
+
+    for (const row of loaded) {
+      if (row.intent === 'sponsor') {
+        const sponsorBase = computeSponsorPeaks(row.ctx.settings, 1);
+        const priced = checkoutBreakdownWithDiscount(
+          sponsorBase,
+          row.ctx.settings.videoPricePeaks,
+          0,
+        );
+        lines.push({
+          jobId: row.jobId,
+          intent: 'sponsor',
+          videoName: row.videoName,
+          sessionId: row.ctx.session.sessionId,
+          sessionLabel: row.sessionMeta.sessionLabel,
+          thumbnailUrl: row.thumbnailUrl,
+          listPricePeaks: priced.listPricePeaks,
+          discountPercent: priced.discountPercent,
+          discountPeaksSaved: priced.discountPeaksSaved,
+          basePeaks: priced.basePeaks,
+          communityFeePeaks: priced.communityFeePeaks,
+          totalPeaks: priced.totalPeaks,
+          communityFeePercent: priced.communityFeePercent,
+        });
+        continue;
+      }
+      const sid = row.ctx.session.sessionId;
+      const bucket = buyClaimBySession.get(sid) ?? [];
+      bucket.push(row);
+      buyClaimBySession.set(sid, bucket);
+    }
+
+    for (const [, group] of buyClaimBySession) {
+      group.sort((a, b) => a.jobId.localeCompare(b.jobId));
+      const settings = group[0]!.ctx.settings;
+      const pricedLines = allocateBuyClaimLineBreakdowns(settings, group.length);
+      for (let i = 0; i < group.length; i += 1) {
+        const row = group[i]!;
+        const priced = pricedLines[i]!;
+        lines.push({
+          jobId: row.jobId,
+          intent: 'buy_claim',
+          videoName: row.videoName,
+          sessionId: row.ctx.session.sessionId,
+          sessionLabel: row.sessionMeta.sessionLabel,
+          thumbnailUrl: row.thumbnailUrl,
+          listPricePeaks: priced.listPricePeaks,
+          discountPercent: priced.discountPercent,
+          discountPeaksSaved: priced.discountPeaksSaved,
+          basePeaks: priced.basePeaks,
+          communityFeePeaks: priced.communityFeePeaks,
+          totalPeaks: priced.totalPeaks,
+          communityFeePercent: priced.communityFeePercent,
+        });
+      }
+    }
+
+    lines.sort((a, b) => a.jobId.localeCompare(b.jobId));
+    const totalPeaks = lines.reduce((sum, line) => sum + line.totalPeaks, 0);
+    return { lines, totalPeaks };
+  }
+
+  async buyAndClaimVideoWaves(
+    viewerUserId: string,
+    jobIds: string[],
+  ): Promise<{
+    jobIds: string[];
+    peaksCharged: number;
+    discountPercent: number;
+    surfer: SurferProfileDto;
+  }> {
+    const result = await this.commercialWave.buyAndClaimWaves(
+      viewerUserId,
+      jobIds,
+    );
+    const surfer = await this.buildSurferDto(viewerUserId);
+    return { ...result, surfer };
   }
 
   async buyAndClaimVideoWave(

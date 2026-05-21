@@ -11,6 +11,7 @@ import { SurfSession } from '../studio/schemas/surf-session.schema';
 import { UserProfile } from '../users/schemas/user-profile.schema';
 import { VideoJob } from '../video/schemas/video-job.schema';
 import {
+  allocateBuyClaimLineBreakdowns,
   computeBuyClaimPeaks,
   computeCheckoutTotal,
   computeSponsorPeaks,
@@ -200,6 +201,111 @@ export class CommercialWaveService {
       claimedAt,
       peaksCharged: totalPeaks,
       discountPercent,
+    };
+  }
+
+  async buyAndClaimWaves(
+    buyerUserId: string,
+    jobIds: string[],
+  ): Promise<{
+    jobIds: string[];
+    peaksCharged: number;
+    discountPercent: number;
+    perJobPeaks: { jobId: string; peaksCharged: number }[];
+  }> {
+    const ids = [...new Set(jobIds.map((id) => id.trim()).filter(Boolean))];
+    if (ids.length === 0) {
+      throw new BadRequestException('At least one video is required');
+    }
+
+    const contexts = await Promise.all(
+      ids.map((jobId) => this.loadCommercialContext(jobId)),
+    );
+    const sessionId = contexts[0]!.session.sessionId;
+    for (const ctx of contexts) {
+      if (ctx.session.sessionId !== sessionId) {
+        throw new BadRequestException(
+          'All videos must belong to the same session for volume pricing',
+        );
+      }
+      if (ctx.job.videoUnlockedForUserId?.trim()) {
+        throw new ConflictException(
+          `Video ${ctx.job.jobId} is already unlocked`,
+        );
+      }
+    }
+
+    const settings = contexts[0]!.settings;
+    const lineBreakdowns = allocateBuyClaimLineBreakdowns(settings, ids.length);
+    const { discountPercent } = computeBuyClaimPeaks(settings, ids.length);
+    const peaksCharged = lineBreakdowns.reduce(
+      (sum, line) => sum + line.totalPeaks,
+      0,
+    );
+    const claimedAt = new Date().toISOString();
+    const unlockedAt = claimedAt;
+
+    const mongoSession = await this.connection.startSession();
+    mongoSession.startTransaction();
+    try {
+      await this.debitPeaks(buyerUserId, peaksCharged, mongoSession);
+
+      for (let i = 0; i < ids.length; i += 1) {
+        const jobId = ids[i]!;
+        const line = lineBreakdowns[i]!;
+        const updated = await this.videoJobModel
+          .updateOne(
+            { jobId, videoUnlockedForUserId: null },
+            {
+              $set: {
+                claimStatus: 'claimed',
+                claimedAt,
+                claimedByUserId: buyerUserId,
+                videoUnlockedForUserId: buyerUserId,
+                videoUnlockedByUserId: buyerUserId,
+                videoUnlockedAt: unlockedAt,
+              },
+            },
+            { session: mongoSession },
+          )
+          .exec();
+        if (updated.matchedCount === 0) {
+          throw new ConflictException(`Video ${jobId} is already unlocked`);
+        }
+
+        await this.waveUnlockPurchaseModel.create(
+          [
+            {
+              jobId,
+              sessionId,
+              buyerUserId,
+              beneficiaryUserId: buyerUserId,
+              type: 'buy_claim',
+              peaksCharged: line.totalPeaks,
+              discountPercent,
+              createdAt: unlockedAt,
+            },
+          ],
+          { session: mongoSession },
+        );
+      }
+
+      await mongoSession.commitTransaction();
+    } catch (err) {
+      await mongoSession.abortTransaction();
+      throw err;
+    } finally {
+      void mongoSession.endSession();
+    }
+
+    return {
+      jobIds: ids,
+      peaksCharged,
+      discountPercent,
+      perJobPeaks: ids.map((jobId, i) => ({
+        jobId,
+        peaksCharged: lineBreakdowns[i]!.totalPeaks,
+      })),
     };
   }
 
