@@ -5,6 +5,13 @@ import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import type { SurferProfileDto } from '../feed/feed.service';
+import {
+  computeBuyClaimPeaks,
+  computeCheckoutTotal,
+  computeSponsorPeaks,
+  resolveEffectiveCommercialSettings,
+} from '../commercial/commercial-pricing';
+import type { CommercialSettings } from '../commercial/commercial-settings.types';
 import { PartnerProfile } from '../partner/schemas/partner-profile.schema';
 import { UserProfile } from '../users/schemas/user-profile.schema';
 import { S3Service } from '../s3/s3.service';
@@ -27,17 +34,27 @@ export type PublicSharedSessionWaveDto = {
   createdAt: string;
   thumbnailUrls: string[];
   thumbnailUrl: string | null;
-  videoUrl: string;
-  processedDownloadUrl: string;
+  snapshotUrls: string[];
+  videoUrl: string | null;
+  processedDownloadUrl: string | null;
   hasOriginal: boolean;
   originalDownloadUrl: string | null;
   claimStatus: 'none' | 'claimed' | 'auto';
   canClaim: boolean;
   surfer: SurferProfileDto | null;
+  isCommercial: boolean;
+  videoUnlockedByViewer: boolean;
+  wavePricePeaks: number | null;
+  buyClaimPricePeaks: number | null;
+  sponsorPricePeaks: number | null;
+  canBuyClaim: boolean;
+  canSponsor: boolean;
+  claimedByViewer: boolean;
 };
 
 export type PublicSharedSessionDto = {
   shareToken: string;
+  isCommercial: boolean;
   partnerName: string | null;
   partnerAvatarUrl: string | null;
   exports: {
@@ -185,6 +202,64 @@ export class SharedSessionService {
     );
   }
 
+  private commercialWaveExtras(
+    session: SurfSession,
+    partner: { commercialSettings?: CommercialSettings | null } | null,
+    doc: {
+      claimStatus?: string;
+      claimedByUserId?: string | null;
+      videoUnlockedForUserId?: string | null;
+    },
+    viewerUserId: string,
+  ): {
+    videoUnlockedByViewer: boolean;
+    wavePricePeaks: number | null;
+    buyClaimPricePeaks: number | null;
+    sponsorPricePeaks: number | null;
+    canClaim: boolean;
+    canBuyClaim: boolean;
+    canSponsor: boolean;
+    claimedByViewer: boolean;
+  } {
+    const settings = resolveEffectiveCommercialSettings(
+      {
+        isCommercial: session.isCommercial,
+        commercialSettings:
+          session.commercialSettings as CommercialSettings | null,
+      },
+      partner,
+    );
+    const claimStatus = doc.claimStatus ?? 'none';
+    const unlockedFor = doc.videoUnlockedForUserId?.trim() || null;
+    const claimedBy = doc.claimedByUserId?.trim() || null;
+    const videoUnlockedByViewer = unlockedFor === viewerUserId;
+    const wavePricePeaks = settings?.videoPricePeaks ?? null;
+    const buyClaimPricePeaks = settings
+      ? computeCheckoutTotal(computeBuyClaimPeaks(settings, 1).totalPeaks)
+          .totalPeaks
+      : null;
+    const sponsorPricePeaks = settings
+      ? computeCheckoutTotal(computeSponsorPeaks(settings, 1)).totalPeaks
+      : null;
+    const canClaim = claimStatus === 'none' && !unlockedFor;
+    const canBuyClaim = Boolean(settings && buyClaimPricePeaks != null);
+    const canSponsor =
+      Boolean(settings) &&
+      !unlockedFor &&
+      (claimStatus !== 'claimed' ||
+        (Boolean(claimedBy) && claimedBy !== viewerUserId));
+    return {
+      videoUnlockedByViewer,
+      wavePricePeaks,
+      buyClaimPricePeaks,
+      sponsorPricePeaks,
+      canClaim,
+      canBuyClaim,
+      canSponsor,
+      claimedByViewer: claimedBy === viewerUserId,
+    };
+  }
+
   private async resolveAvatarUrl(
     avatarKey: string | null,
   ): Promise<string | null> {
@@ -198,6 +273,7 @@ export class SharedSessionService {
 
   async getPublicSharedSession(
     shareToken: string,
+    viewerUserId?: string | null,
   ): Promise<PublicSharedSessionDto> {
     const token = shareToken.trim();
     if (!token) {
@@ -244,6 +320,8 @@ export class SharedSessionService {
     const partnerAvatarUrl = await this.resolveAvatarUrl(
       partner?.avatarKey ?? null,
     );
+    const isCommercial = session.isCommercial === true;
+    const viewerId = viewerUserId?.trim() || null;
 
     const waves: PublicSharedSessionWaveDto[] = [];
     for (const doc of jobs) {
@@ -266,27 +344,85 @@ export class SharedSessionService {
           ? doc.claimStatus
           : 'none';
       const surfer = await this.resolveWaveSurfer(doc);
+
+      let videoUrl: string | null = processedDownloadUrl;
+      let processedDownload: string | null = processedDownloadUrl;
+      let originalDownload: string | null =
+        hasOriginal && rawKey
+          ? await this.s3.presignedGetUrlRaw(rawKey)
+          : null;
+      let canClaim = this.waveCanBeClaimed(doc);
+      let commercialFields = {
+        isCommercial: false,
+        snapshotUrls: thumbnailUrls,
+        videoUnlockedByViewer: true,
+        wavePricePeaks: null as number | null,
+        buyClaimPricePeaks: null as number | null,
+        sponsorPricePeaks: null as number | null,
+        canBuyClaim: false,
+        canSponsor: false,
+        claimedByViewer: false,
+      };
+
+      if (isCommercial) {
+        const extras = viewerId
+          ? this.commercialWaveExtras(session, partner, doc, viewerId)
+          : {
+              videoUnlockedByViewer: false,
+              wavePricePeaks: null,
+              buyClaimPricePeaks: null,
+              sponsorPricePeaks: null,
+              canClaim: false,
+              canBuyClaim: false,
+              canSponsor: false,
+              claimedByViewer: false,
+            };
+        commercialFields = {
+          isCommercial: true,
+          snapshotUrls: thumbnailUrls,
+          ...extras,
+        };
+        canClaim = viewerId ? extras.canClaim : false;
+        const showVideo = extras.videoUnlockedByViewer;
+        videoUrl = showVideo ? processedDownloadUrl : null;
+        processedDownload = showVideo ? processedDownloadUrl : null;
+        if (!showVideo) {
+          originalDownload = null;
+        }
+      }
+
+      const waveHasOriginal = isCommercial
+        ? commercialFields.videoUnlockedByViewer && hasOriginal
+        : hasOriginal;
+
       waves.push({
         jobId: doc.jobId,
         originalFilename: doc.originalFilename ?? 'video',
         createdAt: doc.createdAt,
         thumbnailUrls,
         thumbnailUrl: thumbnailUrls[0] ?? null,
-        videoUrl: processedDownloadUrl,
-        processedDownloadUrl,
-        hasOriginal,
-        originalDownloadUrl:
-          hasOriginal && rawKey
-            ? await this.s3.presignedGetUrlRaw(rawKey)
-            : null,
+        snapshotUrls: commercialFields.snapshotUrls,
+        videoUrl,
+        processedDownloadUrl: processedDownload,
+        hasOriginal: waveHasOriginal,
+        originalDownloadUrl: originalDownload,
         claimStatus,
-        canClaim: this.waveCanBeClaimed(doc),
+        canClaim,
         surfer,
+        isCommercial: commercialFields.isCommercial,
+        videoUnlockedByViewer: commercialFields.videoUnlockedByViewer,
+        wavePricePeaks: commercialFields.wavePricePeaks,
+        buyClaimPricePeaks: commercialFields.buyClaimPricePeaks,
+        sponsorPricePeaks: commercialFields.sponsorPricePeaks,
+        canBuyClaim: commercialFields.canBuyClaim,
+        canSponsor: commercialFields.canSponsor,
+        claimedByViewer: commercialFields.claimedByViewer,
       });
     }
 
     return {
       shareToken: token,
+      isCommercial,
       partnerName,
       partnerAvatarUrl,
       exports: {

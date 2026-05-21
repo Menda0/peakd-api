@@ -5,6 +5,7 @@ import { Spot, SpotSchema } from './schemas/spot.schema';
 import { SurfSession, SurfSessionSchema } from './schemas/surf-session.schema';
 import { StudioController } from './studio.controller';
 import { PublicSharedSessionController } from './public-shared-session.controller';
+import { SharedSessionAuthController } from './shared-session-auth.controller';
 import { SessionExportService } from './session-export.service';
 import { SharedSessionService } from './shared-session.service';
 import { StudioService } from './studio.service';
@@ -33,7 +34,11 @@ import {
       { name: UserProfile.name, schema: UserProfileSchema },
     ]),
   ],
-  controllers: [StudioController, PublicSharedSessionController],
+  controllers: [
+    StudioController,
+    PublicSharedSessionController,
+    SharedSessionAuthController,
+  ],
   providers: [
     StudioService,
     SharedSessionService,
