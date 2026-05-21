@@ -136,6 +136,7 @@ export interface WaveCheckoutContextDto {
   canClaim: boolean;
   canBuyClaim: boolean;
   canSponsor: boolean;
+  claimStatus: VideoClaimStatus;
   buyClaim: CheckoutPeaksBreakdownDto;
   sponsor: CheckoutPeaksBreakdownDto;
   surfer: SurferProfileDto | null;
@@ -327,10 +328,9 @@ export class FeedService {
     const canBuyClaim = Boolean(settings && buyClaimPricePeaks != null);
     const canSponsor =
       Boolean(settings) &&
-      claimStatus === 'claimed' &&
-      Boolean(claimedBy) &&
       !unlockedFor &&
-      claimedBy !== viewerUserId;
+      (claimStatus !== 'claimed' ||
+        (Boolean(claimedBy) && claimedBy !== viewerUserId));
     return {
       isCommercial: true,
       snapshotUrls: [],
@@ -505,6 +505,7 @@ export class FeedService {
       canClaim: extras.canClaim,
       canBuyClaim: extras.canBuyClaim,
       canSponsor: extras.canSponsor,
+      claimStatus: doc.claimStatus ?? 'none',
       buyClaim,
       sponsor,
       surfer,

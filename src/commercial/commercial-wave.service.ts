@@ -212,15 +212,37 @@ export class CommercialWaveService {
     beneficiaryUserId: string;
   }> {
     const ctx = await this.loadCommercialContext(jobId);
-    if (ctx.job.claimStatus !== 'claimed') {
-      throw new BadRequestException('Wave must be claimed before it can be sponsored');
-    }
-    const beneficiary = ctx.job.claimedByUserId?.trim();
-    if (!beneficiary) {
-      throw new BadRequestException('Wave has no claimant to sponsor');
-    }
     if (ctx.job.videoUnlockedForUserId?.trim()) {
       throw new ConflictException('This wave is already unlocked');
+    }
+    const claimStatus = ctx.job.claimStatus ?? 'none';
+    let beneficiary: string;
+    let updateFilter: Record<string, unknown>;
+    if (claimStatus === 'claimed') {
+      const claimant = ctx.job.claimedByUserId?.trim();
+      if (!claimant) {
+        throw new BadRequestException('Wave has no claimant to sponsor');
+      }
+      if (claimant === sponsorUserId) {
+        throw new BadRequestException(
+          'You already claimed this wave — use buy and claim to unlock your video',
+        );
+      }
+      beneficiary = claimant;
+      updateFilter = {
+        jobId,
+        claimStatus: 'claimed',
+        videoUnlockedForUserId: null,
+      };
+    } else if (claimStatus === 'none') {
+      beneficiary = sponsorUserId;
+      updateFilter = {
+        jobId,
+        claimStatus: 'none',
+        videoUnlockedForUserId: null,
+      };
+    } else {
+      throw new BadRequestException('Wave cannot be sponsored in this state');
     }
     const sponsorBase = computeSponsorPeaks(ctx.settings, 1);
     const { totalPeaks: peaksCharged } = computeCheckoutTotal(sponsorBase);
@@ -234,11 +256,7 @@ export class CommercialWaveService {
 
       const updated = await this.videoJobModel
         .findOneAndUpdate(
-          {
-            jobId,
-            claimStatus: 'claimed',
-            videoUnlockedForUserId: null,
-          },
+          updateFilter,
           {
             $set: {
               videoUnlockedForUserId: beneficiary,

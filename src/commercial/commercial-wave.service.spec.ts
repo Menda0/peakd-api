@@ -184,6 +184,41 @@ describe('CommercialWaveService', () => {
     );
   });
 
+  it('sponsorWaveUnlock on unclaimed wave unlocks for sponsor without claiming', async () => {
+    videoJobModel.findOne.mockReturnValue(leanExec(baseJob));
+    videoJobModel.findOneAndUpdate.mockReturnValue({
+      lean: () => ({
+        exec: () =>
+          Promise.resolve({
+            ...baseJob,
+            videoUnlockedForUserId: buyerUserId,
+          }),
+      }),
+    });
+
+    const result = await service.sponsorWaveUnlock(buyerUserId, jobId);
+
+    expect(result.beneficiaryUserId).toBe(buyerUserId);
+    expect(result.peaksCharged).toBe(60);
+    expect(videoJobModel.findOneAndUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        jobId,
+        claimStatus: 'none',
+        videoUnlockedForUserId: null,
+      }),
+      expect.objectContaining({
+        $set: expect.objectContaining({
+          videoUnlockedForUserId: buyerUserId,
+          videoUnlockedByUserId: buyerUserId,
+        }),
+      }),
+      expect.any(Object),
+    );
+    const updateSet = videoJobModel.findOneAndUpdate.mock.calls[0][1].$set;
+    expect(updateSet.claimStatus).toBeUndefined();
+    expect(updateSet.claimedByUserId).toBeUndefined();
+  });
+
   it('throws when Peaks balance is insufficient', async () => {
     videoJobModel.findOne.mockReturnValue(leanExec(baseJob));
     userProfileModel.findOneAndUpdate.mockReturnValue(leanExec(null));
