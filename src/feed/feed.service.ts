@@ -19,6 +19,7 @@ import { PartnerProfile } from '../partner/schemas/partner-profile.schema';
 import { UserProfile } from '../users/schemas/user-profile.schema';
 import { CommercialWaveService } from '../commercial/commercial-wave.service';
 import {
+  checkoutBreakdownWithDiscount,
   computeBuyClaimPeaks,
   computeCheckoutTotal,
   computeSponsorPeaks,
@@ -103,6 +104,9 @@ export interface CheckoutPeaksBreakdownDto {
   communityFeePeaks: number;
   totalPeaks: number;
   communityFeePercent: number;
+  listPricePeaks: number;
+  discountPercent: number;
+  discountPeaksSaved: number;
 }
 
 export interface WaveCheckoutSessionWaveDto {
@@ -407,10 +411,18 @@ export class FeedService {
       doc,
       viewerUserId,
     );
-    const buyClaimBase = computeBuyClaimPeaks(settings, 1).totalPeaks;
+    const buyClaimPriced = computeBuyClaimPeaks(settings, 1);
     const sponsorBase = computeSponsorPeaks(settings, 1);
-    const buyClaim = computeCheckoutTotal(buyClaimBase);
-    const sponsor = computeCheckoutTotal(sponsorBase);
+    const buyClaim = checkoutBreakdownWithDiscount(
+      buyClaimPriced.totalPeaks,
+      settings.videoPricePeaks,
+      buyClaimPriced.discountPercent,
+    );
+    const sponsor = checkoutBreakdownWithDiscount(
+      sponsorBase,
+      settings.videoPricePeaks,
+      0,
+    );
 
     const countryCode = session.countryCode;
     const isUndisclosed =

@@ -151,3 +151,25 @@ export function computeCheckoutTotal(basePeaks: number): CheckoutPeaksBreakdown 
     communityFeePercent: COMMUNITY_FEE_PERCENT,
   };
 }
+
+export type CheckoutBreakdownWithDiscount = CheckoutPeaksBreakdown & {
+  listPricePeaks: number;
+  discountPercent: number;
+  discountPeaksSaved: number;
+};
+
+export function checkoutBreakdownWithDiscount(
+  basePeaks: number,
+  listPricePeaks: number,
+  discountPercent: number,
+): CheckoutBreakdownWithDiscount {
+  const checkout = computeCheckoutTotal(basePeaks);
+  const list = Math.max(0, Math.round(listPricePeaks));
+  const base = Math.max(0, Math.round(basePeaks));
+  return {
+    ...checkout,
+    listPricePeaks: list,
+    discountPercent: Math.max(0, Math.round(discountPercent)),
+    discountPeaksSaved: Math.max(0, list - base),
+  };
+}
