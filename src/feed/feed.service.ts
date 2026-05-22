@@ -873,6 +873,21 @@ export class FeedService {
     return null;
   }
 
+  private async resolveDiscoverPlaybackUrl(
+    processedKey: string | null | undefined,
+    status: VideoJobStatus,
+    isCommercial: boolean,
+    videoUnlockedByViewer: boolean,
+  ): Promise<string | null> {
+    if (status !== 'completed' || !processedKey?.trim()) {
+      return null;
+    }
+    if (isCommercial && !videoUnlockedByViewer) {
+      return null;
+    }
+    return this.s3.presignedGetUrl(processedKey);
+  }
+
   private async resolveFeedSurfer(doc: {
     userId: string;
     claimStatus?: VideoClaimStatus;
@@ -1014,7 +1029,7 @@ export class FeedService {
         claimStatus: dto.claimStatus,
         discoverPublishedAt: doc.discoverPublishedAt ?? null,
         uploadSource: doc.uploadSource === 'personal' ? 'personal' : 'studio',
-        surfer: isViewerSurfer ? surfer : null,
+        surfer: dto.surfer ?? (isViewerSurfer ? surfer : null),
         filmedBy,
         isCommercial: dto.isCommercial,
         snapshotUrls: dto.snapshotUrls,
@@ -1257,14 +1272,16 @@ export class FeedService {
     );
     extras.snapshotUrls = snapshotUrls;
 
-    let videoUrl: string | null = null;
+    const videoUrl = await this.resolveDiscoverPlaybackUrl(
+      doc.processedKey,
+      status,
+      isCommercial,
+      extras.videoUnlockedByViewer,
+    );
     let thumbnailUrl: string | null = null;
-    if (status === 'completed' && doc.processedKey && !isCommercial) {
-      videoUrl = await this.s3.presignedGetUrl(doc.processedKey);
-      const snapKey = doc.snapshotKeys?.[0];
-      if (snapKey) {
-        thumbnailUrl = await this.s3.presignedGetUrl(snapKey);
-      }
+    const snapKey = doc.snapshotKeys?.[0];
+    if (snapKey) {
+      thumbnailUrl = await this.s3.presignedGetUrl(snapKey);
     } else if (snapshotUrls[0]) {
       thumbnailUrl = snapshotUrls[0];
     }
@@ -1337,14 +1354,17 @@ export class FeedService {
     );
     extras.snapshotUrls = snapshotUrls;
 
-    let videoUrl: string | null = null;
+    const status = this.normalizeStatus(row);
+    const videoUrl = await this.resolveDiscoverPlaybackUrl(
+      row.processedKey,
+      status,
+      isCommercial,
+      extras.videoUnlockedByViewer,
+    );
     let thumbnailUrl: string | null = null;
-    if (!isCommercial && row.processedKey) {
-      videoUrl = await this.s3.presignedGetUrl(row.processedKey);
-      const snapKey = row.snapshotKeys?.[0];
-      if (snapKey) {
-        thumbnailUrl = await this.s3.presignedGetUrl(snapKey);
-      }
+    const snapKey = row.snapshotKeys?.[0];
+    if (snapKey) {
+      thumbnailUrl = await this.s3.presignedGetUrl(snapKey);
     } else if (snapshotUrls[0]) {
       thumbnailUrl = snapshotUrls[0];
     }
@@ -1362,7 +1382,7 @@ export class FeedService {
     return {
       jobId: row.jobId,
       createdAt: row.createdAt,
-      status: this.normalizeStatus(row),
+      status,
       videoUrl,
       thumbnailUrl,
       author,
