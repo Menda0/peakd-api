@@ -36,6 +36,8 @@ export type CommercialWaveContext = {
   session: {
     sessionId: string;
     userId: string;
+    countryCode: string;
+    regionId: string;
     isCommercial?: boolean;
     commercialSettings?: CommercialSettings | null;
   };
@@ -98,8 +100,38 @@ export class CommercialWaveService {
     }
     return {
       job: doc,
-      session: session as CommercialWaveContext['session'],
+      session: {
+        sessionId: session.sessionId,
+        userId: session.userId,
+        countryCode: session.countryCode,
+        regionId: session.regionId,
+        isCommercial: session.isCommercial,
+        commercialSettings: session.commercialSettings as CommercialSettings | null,
+      },
       settings,
+    };
+  }
+
+  private buildPurchaseLedger(
+    ctx: CommercialWaveContext,
+    fields: {
+      jobId: string;
+      buyerUserId: string;
+      beneficiaryUserId: string;
+      type: 'buy_claim' | 'sponsor';
+      peaksCharged: number;
+      basePeaks: number;
+      communityFeePeaks: number;
+      discountPercent: number;
+      createdAt: string;
+    },
+  ) {
+    return {
+      ...fields,
+      sessionId: ctx.session.sessionId,
+      partnerUserId: ctx.session.userId,
+      countryCode: ctx.session.countryCode,
+      regionId: ctx.session.regionId,
     };
   }
 
@@ -128,6 +160,32 @@ export class CommercialWaveService {
     }
   }
 
+  private async creditPeaks(
+    userId: string,
+    amount: number,
+    mongoSession: import('mongoose').ClientSession,
+  ): Promise<void> {
+    if (amount < 1) {
+      throw new BadRequestException('Invalid Peaks credit amount');
+    }
+    await this.userProfileModel.updateOne(
+      { userId },
+      {
+        $inc: { peaksBalance: amount },
+        $setOnInsert: {
+          userId,
+          displayName: null,
+          nickname: null,
+          countryCode: null,
+          homeRegionId: null,
+          surfLevel: null,
+          avatarKey: null,
+        },
+      },
+      { session: mongoSession, upsert: true },
+    );
+  }
+
   async buyAndClaimWave(
     buyerUserId: string,
     jobId: string,
@@ -144,15 +202,17 @@ export class CommercialWaveService {
       ctx.settings,
       quantity,
     );
-    const { totalPeaks } = computeCheckoutTotal(basePeaks);
+    const checkout = computeCheckoutTotal(basePeaks);
+    const { totalPeaks, communityFeePeaks } = checkout;
     const claimedAt = new Date().toISOString();
     const unlockedAt = claimedAt;
-    const sessionId = ctx.session.sessionId;
+    const partnerUserId = ctx.session.userId;
 
     const mongoSession = await this.connection.startSession();
     mongoSession.startTransaction();
     try {
       await this.debitPeaks(buyerUserId, totalPeaks, mongoSession);
+      await this.creditPeaks(partnerUserId, basePeaks, mongoSession);
 
       await this.videoJobModel
         .updateOne(
@@ -173,16 +233,17 @@ export class CommercialWaveService {
 
       await this.waveUnlockPurchaseModel.create(
         [
-          {
+          this.buildPurchaseLedger(ctx, {
             jobId,
-            sessionId,
             buyerUserId,
             beneficiaryUserId: buyerUserId,
             type: 'buy_claim',
             peaksCharged: totalPeaks,
+            basePeaks,
+            communityFeePeaks,
             discountPercent,
             createdAt: unlockedAt,
-          },
+          }),
         ],
         { session: mongoSession },
       );
@@ -242,13 +303,20 @@ export class CommercialWaveService {
       (sum, line) => sum + line.totalPeaks,
       0,
     );
+    const partnerBaseTotal = lineBreakdowns.reduce(
+      (sum, line) => sum + line.basePeaks,
+      0,
+    );
     const claimedAt = new Date().toISOString();
     const unlockedAt = claimedAt;
+    const ctx = contexts[0]!;
+    const partnerUserId = ctx.session.userId;
 
     const mongoSession = await this.connection.startSession();
     mongoSession.startTransaction();
     try {
       await this.debitPeaks(buyerUserId, peaksCharged, mongoSession);
+      await this.creditPeaks(partnerUserId, partnerBaseTotal, mongoSession);
 
       for (let i = 0; i < ids.length; i += 1) {
         const jobId = ids[i]!;
@@ -275,16 +343,17 @@ export class CommercialWaveService {
 
         await this.waveUnlockPurchaseModel.create(
           [
-            {
+            this.buildPurchaseLedger(ctx, {
               jobId,
-              sessionId,
               buyerUserId,
               beneficiaryUserId: buyerUserId,
               type: 'buy_claim',
               peaksCharged: line.totalPeaks,
+              basePeaks: line.basePeaks,
+              communityFeePeaks: line.communityFeePeaks,
               discountPercent,
               createdAt: unlockedAt,
-            },
+            }),
           ],
           { session: mongoSession },
         );
@@ -351,14 +420,16 @@ export class CommercialWaveService {
       throw new BadRequestException('Wave cannot be sponsored in this state');
     }
     const sponsorBase = computeSponsorPeaks(ctx.settings, 1);
-    const { totalPeaks: peaksCharged } = computeCheckoutTotal(sponsorBase);
+    const checkout = computeCheckoutTotal(sponsorBase);
+    const { totalPeaks: peaksCharged, communityFeePeaks } = checkout;
     const unlockedAt = new Date().toISOString();
-    const sessionId = ctx.session.sessionId;
+    const partnerUserId = ctx.session.userId;
 
     const mongoSession = await this.connection.startSession();
     mongoSession.startTransaction();
     try {
       await this.debitPeaks(sponsorUserId, peaksCharged, mongoSession);
+      await this.creditPeaks(partnerUserId, sponsorBase, mongoSession);
 
       const updated = await this.videoJobModel
         .findOneAndUpdate(
@@ -381,16 +452,17 @@ export class CommercialWaveService {
 
       await this.waveUnlockPurchaseModel.create(
         [
-          {
+          this.buildPurchaseLedger(ctx, {
             jobId,
-            sessionId,
             buyerUserId: sponsorUserId,
             beneficiaryUserId: beneficiary,
             type: 'sponsor',
             peaksCharged,
+            basePeaks: sponsorBase,
+            communityFeePeaks,
             discountPercent: 0,
             createdAt: unlockedAt,
-          },
+          }),
         ],
         { session: mongoSession },
       );

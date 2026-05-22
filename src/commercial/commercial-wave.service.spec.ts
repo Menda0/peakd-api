@@ -18,6 +18,8 @@ describe('CommercialWaveService', () => {
   const commercialSession = {
     sessionId,
     userId: partnerUserId,
+    countryCode: 'PT',
+    regionId: 'region-pt-1',
     isCommercial: true,
     commercialSettings: null,
   };
@@ -52,6 +54,7 @@ describe('CommercialWaveService', () => {
   let userProfileModel: {
     findOneAndUpdate: jest.Mock;
     findOne: jest.Mock;
+    updateOne: jest.Mock;
   };
   let waveUnlockPurchaseModel: { create: jest.Mock };
   let mongoSession: {
@@ -83,6 +86,7 @@ describe('CommercialWaveService', () => {
     userProfileModel = {
       findOneAndUpdate: jest.fn(),
       findOne: jest.fn(),
+      updateOne: jest.fn().mockResolvedValue({ modifiedCount: 1 }),
     };
     waveUnlockPurchaseModel = {
       create: jest.fn().mockResolvedValue(undefined),
@@ -129,6 +133,24 @@ describe('CommercialWaveService', () => {
     expect(userProfileModel.findOneAndUpdate).toHaveBeenCalledWith(
       { userId: buyerUserId, peaksBalance: { $gte: 60 } },
       { $inc: { peaksBalance: -60 } },
+      expect.objectContaining({ session: mongoSession }),
+    );
+    expect(userProfileModel.updateOne).toHaveBeenCalledWith(
+      { userId: partnerUserId },
+      expect.objectContaining({ $inc: { peaksBalance: 50 } }),
+      expect.objectContaining({ session: mongoSession, upsert: true }),
+    );
+    expect(waveUnlockPurchaseModel.create).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({
+          partnerUserId,
+          basePeaks: 50,
+          communityFeePeaks: 10,
+          peaksCharged: 60,
+          countryCode: 'PT',
+          regionId: 'region-pt-1',
+        }),
+      ],
       expect.objectContaining({ session: mongoSession }),
     );
     expect(videoJobModel.updateOne).toHaveBeenCalledWith(
