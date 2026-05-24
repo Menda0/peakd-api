@@ -28,6 +28,25 @@ export class WaveUnlockPurchase {
   @Prop({ required: true })
   peaksCharged: number;
 
+  /** Partner (session owner) who earns the list-price share. */
+  @Prop({ required: true, index: true })
+  partnerUserId: string;
+
+  /** List price after volume discount — credited to partner. */
+  @Prop({ required: true })
+  basePeaks: number;
+
+  /** Community fee portion — attributed to session geo for reporting. */
+  @Prop({ required: true })
+  communityFeePeaks: number;
+
+  /** ISO 3166-1 alpha-2 from surf session. */
+  @Prop({ required: true, index: true })
+  countryCode: string;
+
+  @Prop({ required: true, index: true })
+  regionId: string;
+
   @Prop({ type: Number, default: 0 })
   discountPercent: number;
 
@@ -39,3 +58,6 @@ export const WaveUnlockPurchaseSchema =
   SchemaFactory.createForClass(WaveUnlockPurchase);
 
 WaveUnlockPurchaseSchema.index({ jobId: 1, buyerUserId: 1, type: 1 });
+WaveUnlockPurchaseSchema.index({ createdAt: -1 });
+WaveUnlockPurchaseSchema.index({ countryCode: 1 });
+WaveUnlockPurchaseSchema.index({ regionId: 1 });
