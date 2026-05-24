@@ -8,29 +8,42 @@ export class AdminPeaksController {
   constructor(private readonly peaks: AdminPeaksService) {}
 
   @Get('summary')
-  getSummary() {
-    return this.peaks.getSummary();
+  getSummary(
+    @Query('countryCode') countryCode?: string,
+    @Query('regionId') regionId?: string,
+  ) {
+    return this.peaks.getSummary({ countryCode, regionId });
   }
 
   @Get('transactions')
   listTransactions(
     @Query('limit') limit?: string,
     @Query('cursor') cursor?: string,
+    @Query('countryCode') countryCode?: string,
+    @Query('regionId') regionId?: string,
   ) {
     const parsedLimit = limit != null ? Number(limit) : undefined;
     return this.peaks.listTransactions({
       limit: Number.isFinite(parsedLimit) ? parsedLimit : undefined,
       cursor,
+      countryCode,
+      regionId,
     });
   }
 
   @Get('by-country')
-  listByCountry() {
-    return this.peaks.listByCountry();
+  listByCountry(
+    @Query('countryCode') countryCode?: string,
+    @Query('regionId') regionId?: string,
+  ) {
+    return this.peaks.listByCountry({ countryCode, regionId });
   }
 
   @Get('by-region')
-  listByRegion(@Query('countryCode') countryCode: string) {
-    return this.peaks.listByRegion(countryCode ?? '');
+  listByRegion(
+    @Query('countryCode') countryCode: string,
+    @Query('regionId') regionId?: string,
+  ) {
+    return this.peaks.listByRegion(countryCode ?? '', { regionId });
   }
 }

@@ -3,6 +3,10 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { WaveUnlockPurchase } from '../commercial/schemas/wave-unlock-purchase.schema';
 import { Region } from '../studio/schemas/region.schema';
+import {
+  isUndisclosedRegionId,
+  UNDISCLOSED_REGION_ID_PATTERN,
+} from '../studio/geo-undisclosed';
 import { UserProfile } from '../users/schemas/user-profile.schema';
 
 const COUNTRY_CODE = /^[A-Z]{2}$/;
@@ -10,6 +14,11 @@ const COUNTRY_CODE = /^[A-Z]{2}$/;
 function normalizeCountryCode(code: string): string {
   return code.trim().toUpperCase();
 }
+
+export type AdminPeaksGeoFilter = {
+  countryCode?: string;
+  regionId?: string;
+};
 
 export type AdminPeaksSummaryDto = {
   circulatingPeaks: number;
@@ -52,6 +61,57 @@ export type AdminPeaksGeoRowDto = {
   totalPeaksCharged: number;
 };
 
+function parseGeoFilter(raw: {
+  countryCode?: string;
+  regionId?: string;
+}): AdminPeaksGeoFilter {
+  const countryCode = raw.countryCode?.trim()
+    ? normalizeCountryCode(raw.countryCode)
+    : undefined;
+  const regionId = raw.regionId?.trim() || undefined;
+  if (countryCode && !COUNTRY_CODE.test(countryCode)) {
+    throw new BadRequestException('countryCode must be a 2-letter ISO code');
+  }
+  if (regionId && countryCode && isUndisclosedRegionId(regionId, countryCode)) {
+    throw new BadRequestException(
+      'Cannot filter community fees by undisclosed region',
+    );
+  }
+  if (regionId && !countryCode) {
+    throw new BadRequestException('countryCode is required when regionId is set');
+  }
+  return { countryCode, regionId };
+}
+
+function purchaseMatchFilter(filter: AdminPeaksGeoFilter): Record<string, unknown> {
+  const match: Record<string, unknown> = {};
+  if (filter.countryCode) {
+    match.countryCode = filter.countryCode;
+  }
+  if (filter.regionId) {
+    match.regionId = filter.regionId;
+  }
+  return match;
+}
+
+/** Community fees are not attributed to undisclosed synthetic regions. */
+function attributedCommunityFeePeaksExpr() {
+  return {
+    $sum: {
+      $cond: [
+        {
+          $regexMatch: {
+            input: { $ifNull: ['$regionId', ''] },
+            regex: UNDISCLOSED_REGION_ID_PATTERN,
+          },
+        },
+        0,
+        { $ifNull: ['$communityFeePeaks', 0] },
+      ],
+    },
+  };
+}
+
 @Injectable()
 export class AdminPeaksService {
   constructor(
@@ -63,7 +123,10 @@ export class AdminPeaksService {
     private readonly regionModel: Model<Region>,
   ) {}
 
-  async getSummary(): Promise<AdminPeaksSummaryDto> {
+  async getSummary(filterRaw?: AdminPeaksGeoFilter): Promise<AdminPeaksSummaryDto> {
+    const filter = parseGeoFilter(filterRaw ?? {});
+    const purchaseMatch = purchaseMatchFilter(filter);
+
     const [balanceAgg, unlockAgg] = await Promise.all([
       this.userProfileModel
         .aggregate<{ total: number }>([
@@ -77,15 +140,16 @@ export class AdminPeaksService {
           totalPartnerPeaks: number;
           totalCommunityFeePeaks: number;
         }>([
+          ...(Object.keys(purchaseMatch).length > 0
+            ? [{ $match: purchaseMatch }]
+            : []),
           {
             $group: {
               _id: null,
               count: { $sum: 1 },
               totalPeaksCharged: { $sum: { $ifNull: ['$peaksCharged', 0] } },
               totalPartnerPeaks: { $sum: { $ifNull: ['$basePeaks', 0] } },
-              totalCommunityFeePeaks: {
-                $sum: { $ifNull: ['$communityFeePeaks', 0] },
-              },
+              totalCommunityFeePeaks: attributedCommunityFeePeaksExpr(),
             },
           },
         ])
@@ -105,18 +169,24 @@ export class AdminPeaksService {
   async listTransactions(options: {
     limit?: number;
     cursor?: string;
+    countryCode?: string;
+    regionId?: string;
   }): Promise<AdminPeaksTransactionsPageDto> {
+    const filter = parseGeoFilter({
+      countryCode: options.countryCode,
+      regionId: options.regionId,
+    });
     const limit = Math.min(100, Math.max(1, options.limit ?? 50));
-    const filter: Record<string, unknown> = {};
+    const query: Record<string, unknown> = { ...purchaseMatchFilter(filter) };
     if (options.cursor?.trim()) {
       if (!Types.ObjectId.isValid(options.cursor.trim())) {
         throw new BadRequestException('Invalid cursor');
       }
-      filter._id = { $lt: new Types.ObjectId(options.cursor.trim()) };
+      query._id = { $lt: new Types.ObjectId(options.cursor.trim()) };
     }
 
     const rows = await this.waveUnlockPurchaseModel
-      .find(filter)
+      .find(query)
       .sort({ _id: -1 })
       .limit(limit + 1)
       .lean()
@@ -136,6 +206,8 @@ export class AdminPeaksService {
     const items: AdminPeaksTransactionDto[] = page.map((row) => {
       const id = String(row._id);
       const regionId = row.regionId ?? '';
+      const countryCode = row.countryCode ?? '';
+      const isUndisclosed = isUndisclosedRegionId(regionId, countryCode);
       return {
         id,
         jobId: row.jobId,
@@ -146,9 +218,9 @@ export class AdminPeaksService {
         beneficiaryUserId: row.beneficiaryUserId,
         peaksCharged: row.peaksCharged ?? 0,
         basePeaks: row.basePeaks ?? 0,
-        communityFeePeaks: row.communityFeePeaks ?? 0,
+        communityFeePeaks: isUndisclosed ? 0 : (row.communityFeePeaks ?? 0),
         discountPercent: row.discountPercent ?? 0,
-        countryCode: row.countryCode ?? '',
+        countryCode,
         regionId,
         regionName: regionNameById.get(regionId) ?? null,
         createdAt: row.createdAt,
@@ -159,7 +231,17 @@ export class AdminPeaksService {
     return { items, nextCursor };
   }
 
-  async listByCountry(): Promise<AdminPeaksGeoRowDto[]> {
+  async listByCountry(filterRaw?: AdminPeaksGeoFilter): Promise<AdminPeaksGeoRowDto[]> {
+    const filter = parseGeoFilter(filterRaw ?? {});
+    const match: Record<string, unknown> = {
+      countryCode: { $exists: true, $ne: '' },
+      ...purchaseMatchFilter(
+        filter.countryCode
+          ? { countryCode: filter.countryCode, regionId: filter.regionId }
+          : { regionId: filter.regionId },
+      ),
+    };
+
     const rows = await this.waveUnlockPurchaseModel
       .aggregate<{
         _id: string;
@@ -168,12 +250,12 @@ export class AdminPeaksService {
         partnerPeaks: number;
         totalPeaksCharged: number;
       }>([
-        { $match: { countryCode: { $exists: true, $ne: '' } } },
+        { $match: match },
         {
           $group: {
             _id: '$countryCode',
             transactionCount: { $sum: 1 },
-            communityFeePeaks: { $sum: { $ifNull: ['$communityFeePeaks', 0] } },
+            communityFeePeaks: attributedCommunityFeePeaksExpr(),
             partnerPeaks: { $sum: { $ifNull: ['$basePeaks', 0] } },
             totalPeaksCharged: { $sum: { $ifNull: ['$peaksCharged', 0] } },
           },
@@ -191,11 +273,15 @@ export class AdminPeaksService {
     }));
   }
 
-  async listByRegion(countryCodeRaw: string): Promise<AdminPeaksGeoRowDto[]> {
-    const countryCode = normalizeCountryCode(countryCodeRaw);
-    if (!COUNTRY_CODE.test(countryCode)) {
-      throw new BadRequestException('countryCode must be a 2-letter ISO code');
-    }
+  async listByRegion(
+    countryCodeRaw: string,
+    filterRaw?: { regionId?: string },
+  ): Promise<AdminPeaksGeoRowDto[]> {
+    const filter = parseGeoFilter({
+      countryCode: countryCodeRaw,
+      regionId: filterRaw?.regionId,
+    });
+    const countryCode = filter.countryCode!;
 
     const rows = await this.waveUnlockPurchaseModel
       .aggregate<{
@@ -205,12 +291,19 @@ export class AdminPeaksService {
         partnerPeaks: number;
         totalPeaksCharged: number;
       }>([
-        { $match: { countryCode, regionId: { $exists: true, $ne: '' } } },
+        {
+          $match: {
+            countryCode,
+            regionId: filter.regionId
+              ? filter.regionId
+              : { $exists: true, $ne: '', $not: UNDISCLOSED_REGION_ID_PATTERN },
+          },
+        },
         {
           $group: {
             _id: '$regionId',
             transactionCount: { $sum: 1 },
-            communityFeePeaks: { $sum: { $ifNull: ['$communityFeePeaks', 0] } },
+            communityFeePeaks: attributedCommunityFeePeaksExpr(),
             partnerPeaks: { $sum: { $ifNull: ['$basePeaks', 0] } },
             totalPeaksCharged: { $sum: { $ifNull: ['$peaksCharged', 0] } },
           },

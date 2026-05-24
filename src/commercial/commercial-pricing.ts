@@ -138,8 +138,24 @@ export type CheckoutPeaksBreakdown = {
   communityFeePercent: number;
 };
 
-export function computeCheckoutTotal(basePeaks: number): CheckoutPeaksBreakdown {
+export type CheckoutOptions = {
+  /** When true, no community fee is charged or attributed (undisclosed locations). */
+  waiveCommunityFee?: boolean;
+};
+
+export function computeCheckoutTotal(
+  basePeaks: number,
+  options?: CheckoutOptions,
+): CheckoutPeaksBreakdown {
   const base = Math.max(0, Math.round(basePeaks));
+  if (options?.waiveCommunityFee) {
+    return {
+      basePeaks: base,
+      communityFeePeaks: 0,
+      totalPeaks: base,
+      communityFeePercent: COMMUNITY_FEE_PERCENT,
+    };
+  }
   const communityFeePeaks = Math.max(
     1,
     Math.round((base * COMMUNITY_FEE_PERCENT) / 100),
@@ -162,8 +178,9 @@ export function checkoutBreakdownWithDiscount(
   basePeaks: number,
   listPricePeaks: number,
   discountPercent: number,
+  options?: CheckoutOptions,
 ): CheckoutBreakdownWithDiscount {
-  const checkout = computeCheckoutTotal(basePeaks);
+  const checkout = computeCheckoutTotal(basePeaks, options);
   const list = Math.max(0, Math.round(listPricePeaks));
   const base = Math.max(0, Math.round(basePeaks));
   return {
@@ -196,6 +213,7 @@ export function splitIntegerTotal(total: number, parts: number): number[] {
 export function allocateBuyClaimLineBreakdowns(
   settings: CommercialSettings,
   waveCount: number,
+  options?: CheckoutOptions,
 ): CheckoutBreakdownWithDiscount[] {
   const q = Math.max(1, Math.floor(waveCount));
   const { unitPricePeaks, discountPercent, totalPeaks: discountedBaseTotal } =
@@ -206,6 +224,7 @@ export function allocateBuyClaimLineBreakdowns(
       basePeaks,
       unitPricePeaks,
       discountPercent,
+      options,
     ),
   );
 }

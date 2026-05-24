@@ -1,6 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 import { getConnectionToken, getModelToken } from '@nestjs/mongoose';
 import { Test } from '@nestjs/testing';
+import { undisclosedRegionId, undisclosedSpotId } from '../studio/geo-undisclosed';
 import { CommercialWaveService } from './commercial-wave.service';
 import { PartnerProfile } from '../partner/schemas/partner-profile.schema';
 import { SurfSession } from '../studio/schemas/surf-session.schema';
@@ -20,6 +21,7 @@ describe('CommercialWaveService', () => {
     userId: partnerUserId,
     countryCode: 'PT',
     regionId: 'region-pt-1',
+    spotId: 'spot-pt-1',
     isCommercial: true,
     commercialSettings: null,
   };
@@ -46,6 +48,7 @@ describe('CommercialWaveService', () => {
   };
 
   let service: CommercialWaveService;
+  let surfSessionModel: { findOne: jest.Mock };
   let videoJobModel: {
     findOne: jest.Mock;
     updateOne: jest.Mock;
@@ -92,7 +95,7 @@ describe('CommercialWaveService', () => {
       create: jest.fn().mockResolvedValue(undefined),
     };
 
-    const surfSessionModel = { findOne: jest.fn() };
+    surfSessionModel = { findOne: jest.fn() };
     const partnerProfileModel = { findOne: jest.fn() };
 
     const moduleRef = await Test.createTestingModule({
@@ -239,6 +242,32 @@ describe('CommercialWaveService', () => {
     const updateSet = videoJobModel.findOneAndUpdate.mock.calls[0][1].$set;
     expect(updateSet.claimStatus).toBeUndefined();
     expect(updateSet.claimedByUserId).toBeUndefined();
+  });
+
+  it('buyAndClaimWave at undisclosed location charges no community fee', async () => {
+    surfSessionModel.findOne.mockReturnValue(
+      leanExec({
+        ...commercialSession,
+        regionId: undisclosedRegionId('PT'),
+        spotId: undisclosedSpotId('PT'),
+      }),
+    );
+    videoJobModel.findOne.mockReturnValue(leanExec(baseJob));
+
+    const result = await service.buyAndClaimWave(buyerUserId, jobId, 1);
+
+    expect(result.peaksCharged).toBe(50);
+    expect(waveUnlockPurchaseModel.create).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({
+          peaksCharged: 50,
+          basePeaks: 50,
+          communityFeePeaks: 0,
+        }),
+      ],
+      expect.any(Object),
+    );
+    surfSessionModel.findOne.mockReturnValue(leanExec(commercialSession));
   });
 
   it('throws when Peaks balance is insufficient', async () => {

@@ -16,7 +16,9 @@ import {
   computeCheckoutTotal,
   computeSponsorPeaks,
   resolveEffectiveCommercialSettings,
+  type CheckoutOptions,
 } from './commercial-pricing';
+import { isSessionLocationUndisclosed } from '../studio/geo-undisclosed';
 import type { CommercialSettings } from './commercial-settings.types';
 import { WaveUnlockPurchase } from './schemas/wave-unlock-purchase.schema';
 
@@ -38,6 +40,7 @@ export type CommercialWaveContext = {
     userId: string;
     countryCode: string;
     regionId: string;
+    spotId: string;
     isCommercial?: boolean;
     commercialSettings?: CommercialSettings | null;
   };
@@ -105,11 +108,21 @@ export class CommercialWaveService {
         userId: session.userId,
         countryCode: session.countryCode,
         regionId: session.regionId,
+        spotId: session.spotId,
         isCommercial: session.isCommercial,
         commercialSettings: session.commercialSettings as CommercialSettings | null,
       },
       settings,
     };
+  }
+
+  private checkoutOptions(ctx: CommercialWaveContext): CheckoutOptions {
+    const waiveCommunityFee = isSessionLocationUndisclosed(
+      ctx.session.countryCode,
+      ctx.session.regionId,
+      ctx.session.spotId,
+    );
+    return { waiveCommunityFee };
   }
 
   private buildPurchaseLedger(
@@ -202,7 +215,7 @@ export class CommercialWaveService {
       ctx.settings,
       quantity,
     );
-    const checkout = computeCheckoutTotal(basePeaks);
+    const checkout = computeCheckoutTotal(basePeaks, this.checkoutOptions(ctx));
     const { totalPeaks, communityFeePeaks } = checkout;
     const claimedAt = new Date().toISOString();
     const unlockedAt = claimedAt;
@@ -296,8 +309,13 @@ export class CommercialWaveService {
       }
     }
 
-    const settings = contexts[0]!.settings;
-    const lineBreakdowns = allocateBuyClaimLineBreakdowns(settings, ids.length);
+    const ctx = contexts[0]!;
+    const settings = ctx.settings;
+    const lineBreakdowns = allocateBuyClaimLineBreakdowns(
+      settings,
+      ids.length,
+      this.checkoutOptions(ctx),
+    );
     const { discountPercent } = computeBuyClaimPeaks(settings, ids.length);
     const peaksCharged = lineBreakdowns.reduce(
       (sum, line) => sum + line.totalPeaks,
@@ -309,7 +327,6 @@ export class CommercialWaveService {
     );
     const claimedAt = new Date().toISOString();
     const unlockedAt = claimedAt;
-    const ctx = contexts[0]!;
     const partnerUserId = ctx.session.userId;
 
     const mongoSession = await this.connection.startSession();
@@ -420,7 +437,7 @@ export class CommercialWaveService {
       throw new BadRequestException('Wave cannot be sponsored in this state');
     }
     const sponsorBase = computeSponsorPeaks(ctx.settings, 1);
-    const checkout = computeCheckoutTotal(sponsorBase);
+    const checkout = computeCheckoutTotal(sponsorBase, this.checkoutOptions(ctx));
     const { totalPeaks: peaksCharged, communityFeePeaks } = checkout;
     const unlockedAt = new Date().toISOString();
     const partnerUserId = ctx.session.userId;

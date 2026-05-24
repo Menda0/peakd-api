@@ -9,9 +9,11 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, PipelineStage } from 'mongoose';
 import { S3Service } from '../s3/s3.service';
 import {
+  isSessionLocationUndisclosed,
   isUndisclosedRegionId,
   isUndisclosedSpotId,
 } from '../studio/geo-undisclosed';
+import type { CheckoutOptions } from '../commercial/commercial-pricing';
 import { Region } from '../studio/schemas/region.schema';
 import { Spot } from '../studio/schemas/spot.schema';
 import { SurfSession } from '../studio/schemas/surf-session.schema';
@@ -295,11 +297,28 @@ export class FeedService {
     return urls;
   }
 
+  private checkoutOptionsForSession(session: {
+    countryCode: string;
+    regionId: string;
+    spotId: string;
+  }): CheckoutOptions {
+    return {
+      waiveCommunityFee: isSessionLocationUndisclosed(
+        session.countryCode,
+        session.regionId,
+        session.spotId,
+      ),
+    };
+  }
+
   private commercialExtras(
     session: {
       isCommercial?: boolean;
       commercialSettings?: unknown;
       userId: string;
+      countryCode: string;
+      regionId: string;
+      spotId: string;
     },
     partner: { commercialSettings?: unknown } | null,
     job: {
@@ -345,12 +364,16 @@ export class FeedService {
     const unlockedFor = job.videoUnlockedForUserId?.trim() || null;
     const claimedBy = job.claimedByUserId?.trim() || null;
     const videoUnlockedByViewer = unlockedFor === viewerUserId;
+    const checkoutOpts = this.checkoutOptionsForSession(session);
     const wavePricePeaks = settings?.videoPricePeaks ?? null;
     const buyClaimPricePeaks = settings
-      ? computeCheckoutTotal(computeBuyClaimPeaks(settings, 1).totalPeaks).totalPeaks
+      ? computeCheckoutTotal(
+          computeBuyClaimPeaks(settings, 1).totalPeaks,
+          checkoutOpts,
+        ).totalPeaks
       : null;
     const sponsorPricePeaks = settings
-      ? computeCheckoutTotal(computeSponsorPeaks(settings, 1)).totalPeaks
+      ? computeCheckoutTotal(computeSponsorPeaks(settings, 1), checkoutOpts).totalPeaks
       : null;
     const canClaim =
       claimStatus === 'none' && !unlockedFor;
@@ -489,12 +512,16 @@ export class FeedService {
     const buyClaimBySession = new Map<string, Loaded[]>();
 
     for (const row of loaded) {
+      const checkoutOpts: CheckoutOptions = {
+        waiveCommunityFee: row.sessionMeta.isUndisclosed,
+      };
       if (row.intent === 'sponsor') {
         const sponsorBase = computeSponsorPeaks(row.ctx.settings, 1);
         const priced = checkoutBreakdownWithDiscount(
           sponsorBase,
           row.ctx.settings.videoPricePeaks,
           0,
+          checkoutOpts,
         );
         lines.push({
           jobId: row.jobId,
@@ -522,7 +549,14 @@ export class FeedService {
     for (const [, group] of buyClaimBySession) {
       group.sort((a, b) => a.jobId.localeCompare(b.jobId));
       const settings = group[0]!.ctx.settings;
-      const pricedLines = allocateBuyClaimLineBreakdowns(settings, group.length);
+      const checkoutOpts: CheckoutOptions = {
+        waiveCommunityFee: group[0]!.sessionMeta.isUndisclosed,
+      };
+      const pricedLines = allocateBuyClaimLineBreakdowns(
+        settings,
+        group.length,
+        checkoutOpts,
+      );
       for (let i = 0; i < group.length; i += 1) {
         const row = group[i]!;
         const priced = pricedLines[i]!;
@@ -633,23 +667,27 @@ export class FeedService {
       doc,
       viewerUserId,
     );
+    const countryCode = session.countryCode;
+    const isUndisclosed = isSessionLocationUndisclosed(
+      countryCode,
+      session.regionId,
+      session.spotId,
+    );
+    const checkoutOpts: CheckoutOptions = { waiveCommunityFee: isUndisclosed };
     const buyClaimPriced = computeBuyClaimPeaks(settings, 1);
     const sponsorBase = computeSponsorPeaks(settings, 1);
     const buyClaim = checkoutBreakdownWithDiscount(
       buyClaimPriced.totalPeaks,
       settings.videoPricePeaks,
       buyClaimPriced.discountPercent,
+      checkoutOpts,
     );
     const sponsor = checkoutBreakdownWithDiscount(
       sponsorBase,
       settings.videoPricePeaks,
       0,
+      checkoutOpts,
     );
-
-    const countryCode = session.countryCode;
-    const isUndisclosed =
-      isUndisclosedRegionId(session.regionId, countryCode) ||
-      isUndisclosedSpotId(session.spotId, countryCode);
     const regionName =
       region?.name?.trim() ||
       (isUndisclosedRegionId(session.regionId, countryCode) ? 'Undisclosed' : 'Unknown');
@@ -692,10 +730,10 @@ export class FeedService {
         canBuyClaim: rowExtras.canBuyClaim,
         canSponsor: rowExtras.canSponsor,
         buyClaimTotalPeaks: rowExtras.canBuyClaim
-          ? computeCheckoutTotal(rowBuyBase).totalPeaks
+          ? computeCheckoutTotal(rowBuyBase, checkoutOpts).totalPeaks
           : null,
         sponsorTotalPeaks: rowExtras.canSponsor
-          ? computeCheckoutTotal(rowSponsorBase).totalPeaks
+          ? computeCheckoutTotal(rowSponsorBase, checkoutOpts).totalPeaks
           : null,
       });
     }
