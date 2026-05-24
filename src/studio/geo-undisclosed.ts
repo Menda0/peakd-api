@@ -41,3 +41,17 @@ export function isUndisclosedSpotId(spotId: string, countryCode: string): boolea
     return false;
   }
 }
+
+export function isSessionLocationUndisclosed(
+  countryCode: string,
+  regionId: string,
+  spotId: string,
+): boolean {
+  return (
+    isUndisclosedRegionId(regionId, countryCode) ||
+    isUndisclosedSpotId(spotId, countryCode)
+  );
+}
+
+/** Matches synthetic undisclosed region ids stored on sessions. */
+export const UNDISCLOSED_REGION_ID_PATTERN = /^undisclosed:region:[A-Z]{2}$/;

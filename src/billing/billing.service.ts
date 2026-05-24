@@ -3,6 +3,7 @@ import {
   Injectable,
   InternalServerErrorException,
   OnModuleInit,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
@@ -205,6 +206,26 @@ export class BillingService implements OnModuleInit {
       throw new BadRequestException('Invalid Stripe webhook signature');
     }
 
+    return this.processStripeEvent(event);
+  }
+
+  async processStripeEventFromBff(
+    internalSecret: string | undefined,
+    event: Stripe.Event,
+  ): Promise<{ received: true }> {
+    const expected = this.billing().webhookInternalSecret;
+    if (!expected) {
+      throw new InternalServerErrorException(
+        'BILLING_WEBHOOK_INTERNAL_SECRET is not set',
+      );
+    }
+    if (!internalSecret || internalSecret !== expected) {
+      throw new UnauthorizedException();
+    }
+    return this.processStripeEvent(event);
+  }
+
+  async processStripeEvent(event: Stripe.Event): Promise<{ received: true }> {
     if (event.type === 'checkout.session.completed') {
       const session = event.data.object as Stripe.Checkout.Session;
       await this.fulfillCheckoutIfPaid(session);
@@ -318,7 +339,6 @@ export class BillingService implements OnModuleInit {
             homeRegionId: null,
             surfLevel: null,
             avatarKey: null,
-            peaksBalance: 0,
           },
         },
         { session: mongoSession, upsert: true },
