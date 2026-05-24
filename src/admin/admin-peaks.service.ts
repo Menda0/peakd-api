@@ -28,6 +28,13 @@ export type AdminPeaksSummaryDto = {
   totalPeaksCharged: number;
   totalPartnerPeaks: number;
   totalCommunityFeePeaks: number;
+  /** Community fees for the filtered country (null when no country filter). */
+  countryCommunityFeePeaks: number | null;
+  /**
+   * Community fees for the filtered region, or the sum across disclosed regions in the
+   * country when no region is selected (null when no country filter).
+   */
+  regionsCommunityFeePeaks: number | null;
 };
 
 export type AdminPeaksTransactionDto = {
@@ -163,12 +170,37 @@ export class AdminPeaksService {
     ]);
 
     const unlock = unlockAgg[0];
+    let countryCommunityFeePeaks: number | null = null;
+    let regionsCommunityFeePeaks: number | null = null;
+
+    if (filter.countryCode) {
+      const countryFeeAgg = await this.waveUnlockPurchaseModel
+        .aggregate<{ total: number }>([
+          { $match: purchaseMatchFilter({ countryCode: filter.countryCode }) },
+          { $group: { _id: null, total: attributedCommunityFeePeaksExpr() } },
+        ])
+        .exec();
+      countryCommunityFeePeaks = countryFeeAgg[0]?.total ?? 0;
+
+      if (filter.regionId) {
+        regionsCommunityFeePeaks = unlock?.totalCommunityFeePeaks ?? 0;
+      } else {
+        const regionRows = await this.listByRegion(filter.countryCode);
+        regionsCommunityFeePeaks = regionRows.reduce(
+          (sum, row) => sum + row.communityFeePeaks,
+          0,
+        );
+      }
+    }
+
     return {
       circulatingPeaks: Math.max(0, Math.round(balanceAgg[0]?.total ?? 0)),
       unlockTransactionCount: unlock?.count ?? 0,
       totalPeaksCharged: unlock?.totalPeaksCharged ?? 0,
       totalPartnerPeaks: unlock?.totalPartnerPeaks ?? 0,
       totalCommunityFeePeaks: unlock?.totalCommunityFeePeaks ?? 0,
+      countryCommunityFeePeaks,
+      regionsCommunityFeePeaks,
     };
   }
 
