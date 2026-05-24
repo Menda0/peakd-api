@@ -8,6 +8,7 @@ import {
 } from '../commercial/schemas/wave-unlock-purchase.schema';
 import { Region, RegionSchema } from '../studio/schemas/region.schema';
 import { Spot, SpotSchema } from '../studio/schemas/spot.schema';
+import { S3Module } from '../s3/s3.module';
 import { UserProfile, UserProfileSchema } from '../users/schemas/user-profile.schema';
 import { AdminPeaksController } from './admin-peaks.controller';
 import { AdminPeaksService } from './admin-peaks.service';
@@ -17,6 +18,7 @@ import { AdminSpotsService } from './admin-spots.service';
 
 @Module({
   imports: [
+    S3Module,
     MongooseModule.forFeature([
       { name: Region.name, schema: RegionSchema },
       { name: Spot.name, schema: SpotSchema },

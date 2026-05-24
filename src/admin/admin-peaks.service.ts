@@ -1,6 +1,8 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
+import { S3Service } from '../s3/s3.service';
 import { WaveUnlockPurchase } from '../commercial/schemas/wave-unlock-purchase.schema';
 import { Region } from '../studio/schemas/region.schema';
 import {
@@ -34,6 +36,8 @@ export type AdminPeaksTransactionDto = {
   sessionId: string;
   type: string;
   buyerUserId: string;
+  buyerDisplayName: string | null;
+  buyerAvatarUrl: string | null;
   partnerUserId: string;
   beneficiaryUserId: string;
   peaksCharged: number;
@@ -121,6 +125,8 @@ export class AdminPeaksService {
     private readonly userProfileModel: Model<UserProfile>,
     @InjectModel(Region.name)
     private readonly regionModel: Model<Region>,
+    private readonly config: ConfigService,
+    private readonly s3: S3Service,
   ) {}
 
   async getSummary(filterRaw?: AdminPeaksGeoFilter): Promise<AdminPeaksSummaryDto> {
@@ -202,18 +208,32 @@ export class AdminPeaksService {
       ),
     ];
     const regionNameById = await this.regionNamesById(regionIds);
+    const buyerUserIds = [
+      ...new Set(
+        page
+          .map((r) => r.buyerUserId?.trim())
+          .filter((id): id is string => Boolean(id)),
+      ),
+    ];
+    const buyerByUserId = await this.buyerSummariesByUserId(buyerUserIds);
 
     const items: AdminPeaksTransactionDto[] = page.map((row) => {
       const id = String(row._id);
       const regionId = row.regionId ?? '';
       const countryCode = row.countryCode ?? '';
       const isUndisclosed = isUndisclosedRegionId(regionId, countryCode);
+      const buyer = buyerByUserId.get(row.buyerUserId) ?? {
+        displayName: null,
+        avatarUrl: null,
+      };
       return {
         id,
         jobId: row.jobId,
         sessionId: row.sessionId,
         type: row.type,
         buyerUserId: row.buyerUserId,
+        buyerDisplayName: buyer.displayName,
+        buyerAvatarUrl: buyer.avatarUrl,
         partnerUserId: row.partnerUserId ?? '',
         beneficiaryUserId: row.beneficiaryUserId,
         peaksCharged: row.peaksCharged ?? 0,
@@ -324,6 +344,52 @@ export class AdminPeaksService {
       partnerPeaks: row.partnerPeaks,
       totalPeaksCharged: row.totalPeaksCharged,
     }));
+  }
+
+  private async resolveAvatarUrl(avatarKey: string | null): Promise<string | null> {
+    if (!avatarKey?.trim()) return null;
+    const publicBase = this.config.get<string>('S3_PUBLIC_BASE_URL')?.trim();
+    if (publicBase) {
+      return `${publicBase.replace(/\/+$/, '')}/${avatarKey.trim()}`;
+    }
+    const expiry = Number(
+      this.config.get<string>('USER_AVATAR_GET_URL_EXPIRY_SECONDS') ?? '604800',
+    );
+    return this.s3.presignedGetUrl(avatarKey.trim(), expiry);
+  }
+
+  private async buyerSummariesByUserId(
+    userIds: string[],
+  ): Promise<Map<string, { displayName: string | null; avatarUrl: string | null }>> {
+    const out = new Map<string, { displayName: string | null; avatarUrl: string | null }>();
+    if (userIds.length === 0) return out;
+
+    const profiles = await this.userProfileModel
+      .find({ userId: { $in: userIds } })
+      .select({ userId: 1, displayName: 1, nickname: 1, avatarKey: 1 })
+      .lean()
+      .exec();
+
+    const avatarUrlByKey = new Map<string, string | null>();
+    for (const profile of profiles) {
+      const key = profile.avatarKey?.trim();
+      if (key && !avatarUrlByKey.has(key)) {
+        avatarUrlByKey.set(key, await this.resolveAvatarUrl(key));
+      }
+      const displayName =
+        profile.displayName?.trim() || profile.nickname?.trim() || null;
+      out.set(profile.userId, {
+        displayName,
+        avatarUrl: key ? (avatarUrlByKey.get(key) ?? null) : null,
+      });
+    }
+
+    for (const userId of userIds) {
+      if (!out.has(userId)) {
+        out.set(userId, { displayName: null, avatarUrl: null });
+      }
+    }
+    return out;
   }
 
   private async regionNamesById(regionIds: string[]): Promise<Map<string, string>> {
