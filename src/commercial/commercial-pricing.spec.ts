@@ -72,4 +72,20 @@ describe('commercial-pricing', () => {
       communityFeePercent: 20,
     });
   });
+
+  it('waives community fee for undisclosed locations', () => {
+    expect(computeCheckoutTotal(50, { waiveCommunityFee: true })).toEqual({
+      basePeaks: 50,
+      communityFeePeaks: 0,
+      totalPeaks: 50,
+      communityFeePercent: 20,
+    });
+    const lines = allocateBuyClaimLineBreakdowns(settings, 2, {
+      waiveCommunityFee: true,
+    });
+    expect(lines.every((l) => l.communityFeePeaks === 0)).toBe(true);
+    expect(lines.reduce((s, l) => s + l.totalPeaks, 0)).toBe(
+      lines.reduce((s, l) => s + l.basePeaks, 0),
+    );
+  });
 });
