@@ -173,7 +173,12 @@ export class CommercialWaveService {
     }
   }
 
-  private async creditPeaks(
+  /**
+   * Credits partner earnings into the dedicated `partnerEarningsPeaks` field
+   * so partners cannot spend earnings before withdrawing them via Stripe.
+   * Earnings are converted to EUR and paid out through the payouts module.
+   */
+  private async creditPartnerEarnings(
     userId: string,
     amount: number,
     mongoSession: import('mongoose').ClientSession,
@@ -184,7 +189,7 @@ export class CommercialWaveService {
     await this.userProfileModel.updateOne(
       { userId },
       {
-        $inc: { peaksBalance: amount },
+        $inc: { partnerEarningsPeaks: amount },
         $setOnInsert: {
           userId,
           displayName: null,
@@ -213,10 +218,8 @@ export class CommercialWaveService {
     const ctx = await this.loadCommercialContext(jobId);
     const partnerUserId = ctx.session.userId;
     if (buyerUserId === partnerUserId) {
-      // Without this guard, debitPeaks and creditPeaks both target the same
-      // user document inside the transaction and the two $inc ops cancel out
-      // (partially, or fully at undisclosed locations), so the buyer's Peaks
-      // balance appears unchanged after a successful purchase.
+      // Self-purchase has no economic meaning: the partner would burn spendable
+      // Peaks just to credit their own withdrawable earnings.
       throw new BadRequestException(
         "You can't buy and claim your own session's wave",
       );
@@ -234,7 +237,7 @@ export class CommercialWaveService {
     mongoSession.startTransaction();
     try {
       await this.debitPeaks(buyerUserId, totalPeaks, mongoSession);
-      await this.creditPeaks(partnerUserId, basePeaks, mongoSession);
+      await this.creditPartnerEarnings(partnerUserId, basePeaks, mongoSession);
 
       await this.videoJobModel
         .updateOne(
@@ -348,7 +351,11 @@ export class CommercialWaveService {
     mongoSession.startTransaction();
     try {
       await this.debitPeaks(buyerUserId, peaksCharged, mongoSession);
-      await this.creditPeaks(partnerUserId, partnerBaseTotal, mongoSession);
+      await this.creditPartnerEarnings(
+        partnerUserId,
+        partnerBaseTotal,
+        mongoSession,
+      );
 
       for (let i = 0; i < ids.length; i += 1) {
         const jobId = ids[i]!;
@@ -466,7 +473,11 @@ export class CommercialWaveService {
     mongoSession.startTransaction();
     try {
       await this.debitPeaks(sponsorUserId, peaksCharged, mongoSession);
-      await this.creditPeaks(partnerUserId, sponsorBase, mongoSession);
+      await this.creditPartnerEarnings(
+        partnerUserId,
+        sponsorBase,
+        mongoSession,
+      );
 
       const updated = await this.videoJobModel
         .findOneAndUpdate(
