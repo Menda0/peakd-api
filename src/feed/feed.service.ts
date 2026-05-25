@@ -43,6 +43,58 @@ import {
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
 const SNAPSHOT_URL_MAX = 4;
+const DEFAULT_GEO_SUGGEST_LIMIT = 12;
+const MAX_GEO_SUGGEST_LIMIT = 24;
+const SEARCH_PREVIEW_THUMBS = 3;
+const COUNTRY_CODE = /^[A-Z]{2}$/;
+const SESSION_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const MONTH_YM = /^\d{4}-\d{2}$/;
+const UNDISCLOSED_REGION_PREFIX = 'undisclosed:region:';
+const UNDISCLOSED_SPOT_PREFIX = 'undisclosed:spot:';
+
+export interface GeoSuggestItemDto {
+  type: 'country' | 'region' | 'spot';
+  countryCode: string;
+  regionId?: string;
+  spotId?: string;
+  label: string;
+  name: string;
+  verified: boolean;
+}
+
+export interface SearchSessionAuthorDto {
+  userId: string;
+  displayName: string | null;
+  avatarUrl: string | null;
+  isPartner: boolean;
+  partnerType: 'videographer' | 'coach' | 'other' | null;
+}
+
+export interface SearchSessionSurferDto {
+  userId: string;
+  displayName: string | null;
+  avatarUrl: string | null;
+}
+
+export interface SearchSessionDto {
+  sessionId: string;
+  shareToken: string | null;
+  isCommercial: boolean;
+  countryCode: string;
+  regionId: string;
+  spotId: string;
+  sessionDate: string;
+  sessionTime: string;
+  durationMinutes: number;
+  conditionsRating: number | null;
+  waveTypes: string[];
+  regionName: string;
+  spotName: string | null;
+  author: SearchSessionAuthorDto;
+  surfers: SearchSessionSurferDto[];
+  videoCount: number;
+  previewThumbnailUrls: string[];
+}
 
 export interface DiscoverFeedAuthorDto {
   userId: string;
@@ -1440,5 +1492,433 @@ export class FeedService {
       surfer,
       ...extras,
     };
+  }
+
+  private parseGeoSuggestLimit(raw: string | undefined): number {
+    if (!raw?.trim()) return DEFAULT_GEO_SUGGEST_LIMIT;
+    const n = Number.parseInt(raw, 10);
+    if (!Number.isFinite(n) || n < 1) return DEFAULT_GEO_SUGGEST_LIMIT;
+    return Math.min(n, MAX_GEO_SUGGEST_LIMIT);
+  }
+
+  private escapeRegex(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  private normalizeCountryCode(code: string): string {
+    const c = code.trim().toUpperCase();
+    if (!COUNTRY_CODE.test(c)) {
+      throw new BadRequestException('Invalid countryCode');
+    }
+    return c;
+  }
+
+  private normalizeSessionDate(value: string): string {
+    const d = value.trim();
+    if (!SESSION_DATE.test(d)) {
+      throw new BadRequestException('Invalid sessionDate');
+    }
+    return d;
+  }
+
+  private normalizeMonthYm(value: string): string {
+    const m = value.trim();
+    if (!MONTH_YM.test(m)) {
+      throw new BadRequestException('Invalid month');
+    }
+    const [, mon] = m.split('-');
+    const monthNum = Number.parseInt(mon!, 10);
+    if (monthNum < 1 || monthNum > 12) {
+      throw new BadRequestException('Invalid month');
+    }
+    return m;
+  }
+
+  private monthDateRange(month: string): { from: string; to: string } {
+    const [yearStr, monStr] = month.split('-');
+    const year = Number.parseInt(yearStr!, 10);
+    const monthNum = Number.parseInt(monStr!, 10);
+    const lastDay = new Date(year, monthNum, 0).getDate();
+    return {
+      from: `${month}-01`,
+      to: `${month}-${String(lastDay).padStart(2, '0')}`,
+    };
+  }
+
+  private discoverJobsWithSessionStages(): PipelineStage[] {
+    return [
+      {
+        $match: {
+          discoverPublishedAt: { $ne: null },
+          status: 'completed',
+          processedKey: { $exists: true, $ne: null },
+          surfSessionId: { $ne: null },
+        },
+      },
+      {
+        $lookup: {
+          from: 'surf_sessions',
+          localField: 'surfSessionId',
+          foreignField: 'sessionId',
+          as: 'session',
+        },
+      },
+      { $unwind: { path: '$session', preserveNullAndEmptyArrays: false } },
+      // Join the session's region so country filters can fall back on the
+      // canonical region.countryCode if the denormalized session.countryCode
+      // is missing or has inconsistent casing in legacy data.
+      {
+        $lookup: {
+          from: 'regions',
+          localField: 'session.regionId',
+          foreignField: 'regionId',
+          as: 'region',
+        },
+      },
+      {
+        $unwind: { path: '$region', preserveNullAndEmptyArrays: true },
+      },
+    ];
+  }
+
+  private buildSessionGeoMatch(
+    countryCode: string,
+    sessionDate: string | { from: string; to: string },
+    regionId?: string,
+    spotId?: string,
+  ): Record<string, unknown> {
+    const cc = countryCode.trim().toUpperCase();
+    const ccRegex = new RegExp(`^${this.escapeRegex(cc)}$`, 'i');
+    // Match either the session's stored countryCode or the joined region's
+    // countryCode (case-insensitive) so legacy/inconsistent data still surfaces.
+    const match: Record<string, unknown> = {
+      $or: [
+        { 'session.countryCode': ccRegex },
+        { 'region.countryCode': ccRegex },
+      ],
+    };
+    if (typeof sessionDate === 'string') {
+      match['session.sessionDate'] = sessionDate;
+    } else {
+      match['session.sessionDate'] = {
+        $gte: sessionDate.from,
+        $lte: sessionDate.to,
+      };
+    }
+    if (regionId?.trim()) {
+      match['session.regionId'] = regionId.trim();
+    }
+    if (spotId?.trim()) {
+      match['session.spotId'] = spotId.trim();
+    }
+    return match;
+  }
+
+  async geoSuggest(
+    q: string | undefined,
+    limitRaw: string | undefined,
+  ): Promise<{ items: GeoSuggestItemDto[] }> {
+    const query = q?.trim() ?? '';
+    if (!query) {
+      throw new BadRequestException('q is required');
+    }
+    const limit = this.parseGeoSuggestLimit(limitRaw);
+    const regex = new RegExp(this.escapeRegex(query), 'i');
+    const regionCap = Math.ceil(limit / 2);
+    const spotCap = Math.floor(limit / 2);
+
+    const [regions, spotRows] = await Promise.all([
+      this.regionModel
+        .find({
+          verified: true,
+          disabled: { $ne: true },
+          name: regex,
+          regionId: { $not: new RegExp(`^${UNDISCLOSED_REGION_PREFIX}`) },
+        })
+        .sort({ name: 1 })
+        .limit(regionCap)
+        .lean()
+        .exec(),
+      this.spotModel
+        .aggregate([
+          {
+            $match: {
+              verified: true,
+              disabled: { $ne: true },
+              name: regex,
+              spotId: { $not: new RegExp(`^${UNDISCLOSED_SPOT_PREFIX}`) },
+            },
+          },
+          {
+            $lookup: {
+              from: 'regions',
+              localField: 'regionId',
+              foreignField: 'regionId',
+              as: 'region',
+            },
+          },
+          { $unwind: { path: '$region', preserveNullAndEmptyArrays: false } },
+          {
+            $match: {
+              'region.disabled': { $ne: true },
+              'region.regionId': {
+                $not: new RegExp(`^${UNDISCLOSED_REGION_PREFIX}`),
+              },
+            },
+          },
+          { $sort: { name: 1 } },
+          { $limit: spotCap },
+        ])
+        .exec(),
+    ]);
+
+    const items: GeoSuggestItemDto[] = [];
+
+    for (const region of regions) {
+      const cc = region.countryCode.trim().toUpperCase();
+      items.push({
+        type: 'region',
+        countryCode: cc,
+        regionId: region.regionId,
+        label: `${region.name.trim()} · ${cc}`,
+        name: region.name.trim(),
+        verified: true,
+      });
+    }
+
+    for (const row of spotRows as Array<{
+      spotId: string;
+      regionId: string;
+      name: string;
+      region: { countryCode: string; name: string };
+    }>) {
+      const cc = row.region.countryCode.trim().toUpperCase();
+      const regionName = row.region.name.trim();
+      items.push({
+        type: 'spot',
+        countryCode: cc,
+        regionId: row.regionId,
+        spotId: row.spotId,
+        label: `${row.name.trim()} · ${regionName} · ${cc}`,
+        name: row.name.trim(),
+        verified: true,
+      });
+    }
+
+    items.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+
+    return { items: items.slice(0, limit) };
+  }
+
+  async searchSessionDates(options: {
+    countryCode?: string;
+    regionId?: string;
+    spotId?: string;
+    month?: string;
+  }): Promise<{ dates: string[] }> {
+    if (!options.countryCode?.trim()) {
+      throw new BadRequestException('countryCode is required');
+    }
+    if (!options.month?.trim()) {
+      throw new BadRequestException('month is required');
+    }
+    const countryCode = this.normalizeCountryCode(options.countryCode);
+    const month = this.normalizeMonthYm(options.month);
+    const { from, to } = this.monthDateRange(month);
+
+    const pipeline: PipelineStage[] = [
+      ...this.discoverJobsWithSessionStages(),
+      {
+        $match: this.buildSessionGeoMatch(
+          countryCode,
+          { from, to },
+          options.regionId,
+          options.spotId,
+        ),
+      },
+      { $group: { _id: '$session.sessionDate' } },
+      { $sort: { _id: 1 } },
+    ];
+
+    const rows = (await this.videoJobModel.aggregate(pipeline).exec()) as Array<{
+      _id: string;
+    }>;
+
+    return { dates: rows.map((r) => r._id).filter(Boolean) };
+  }
+
+  async searchSessions(
+    _viewerUserId: string,
+    options: {
+      countryCode?: string;
+      regionId?: string;
+      spotId?: string;
+      sessionDate?: string;
+    },
+  ): Promise<{ sessions: SearchSessionDto[] }> {
+    if (!options.countryCode?.trim()) {
+      throw new BadRequestException('countryCode is required');
+    }
+    if (!options.sessionDate?.trim()) {
+      throw new BadRequestException('sessionDate is required');
+    }
+    const countryCode = this.normalizeCountryCode(options.countryCode);
+    const sessionDate = this.normalizeSessionDate(options.sessionDate);
+
+    const pipeline: PipelineStage[] = [
+      ...this.discoverJobsWithSessionStages(),
+      {
+        $match: this.buildSessionGeoMatch(
+          countryCode,
+          sessionDate,
+          options.regionId,
+          options.spotId,
+        ),
+      },
+      { $sort: { createdAt: -1 } },
+      {
+        $group: {
+          _id: '$session.sessionId',
+          session: { $first: '$session' },
+          snapshotKeys: {
+            $push: { $arrayElemAt: ['$snapshotKeys', 0] },
+          },
+          claimedSurferIds: {
+            $addToSet: {
+              $cond: [
+                { $eq: ['$claimStatus', 'claimed'] },
+                '$claimedByUserId',
+                null,
+              ],
+            },
+          },
+          videoCount: { $sum: 1 },
+        },
+      },
+      { $sort: { 'session.sessionTime': 1 } },
+    ];
+
+    const rows = (await this.videoJobModel.aggregate(pipeline).exec()) as Array<{
+      _id: string;
+      session: SurfSession;
+      snapshotKeys: (string | null | undefined)[];
+      claimedSurferIds: (string | null | undefined)[];
+      videoCount: number;
+    }>;
+
+    const sessions: SearchSessionDto[] = [];
+    for (const row of rows) {
+      const session = row.session;
+      const [region, spot, authorProfile, partnerProfile] = await Promise.all([
+        this.regionModel.findOne({ regionId: session.regionId }).lean().exec(),
+        this.spotModel.findOne({ spotId: session.spotId }).lean().exec(),
+        this.userProfileModel.findOne({ userId: session.userId }).lean().exec(),
+        this.partnerProfileModel
+          .findOne({ userId: session.userId })
+          .lean()
+          .exec(),
+      ]);
+
+      const isUndisclosed =
+        isUndisclosedRegionId(session.regionId, session.countryCode) ||
+        isUndisclosedSpotId(session.spotId, session.countryCode);
+
+      const regionName =
+        region?.name?.trim() ||
+        (isUndisclosedRegionId(session.regionId, session.countryCode)
+          ? 'Undisclosed'
+          : 'Unknown');
+      const spotName = isUndisclosed ? null : spot?.name?.trim() || null;
+
+      const previewThumbnailUrls: string[] = [];
+      for (const key of row.snapshotKeys) {
+        if (typeof key === 'string' && key.trim() && previewThumbnailUrls.length < SEARCH_PREVIEW_THUMBS) {
+          previewThumbnailUrls.push(await this.s3.presignedGetUrl(key.trim()));
+        }
+      }
+
+      const baseAuthor = await this.buildDiscoverAuthor(
+        session.userId,
+        'studio',
+        authorProfile ?? null,
+        (partnerProfile as {
+          partnerName?: string | null;
+          avatarKey?: string | null;
+        } | null) ?? null,
+      );
+      const partnerTypeRaw = (partnerProfile as {
+        partnerType?: string | null;
+      } | null)?.partnerType;
+      const partnerType: SearchSessionAuthorDto['partnerType'] =
+        partnerTypeRaw === 'videographer' ||
+        partnerTypeRaw === 'coach' ||
+        partnerTypeRaw === 'other'
+          ? partnerTypeRaw
+          : null;
+      const author: SearchSessionAuthorDto = {
+        ...baseAuthor,
+        partnerType: baseAuthor.isPartner ? partnerType ?? 'other' : null,
+      };
+
+      const surferIds = Array.from(
+        new Set(
+          row.claimedSurferIds.filter(
+            (id): id is string => typeof id === 'string' && id.trim().length > 0,
+          ),
+        ),
+      );
+      const surferProfiles = surferIds.length
+        ? await this.userProfileModel
+            .find({ userId: { $in: surferIds } })
+            .lean()
+            .exec()
+        : [];
+      const surferProfileMap = new Map(
+        surferProfiles.map((p) => [p.userId, p]),
+      );
+      const surfers: SearchSessionSurferDto[] = [];
+      for (const surferId of surferIds) {
+        const profile = surferProfileMap.get(surferId);
+        const avatarUrl = await this.resolveAvatarUrl(
+          profile?.avatarKey ?? null,
+        );
+        surfers.push({
+          userId: surferId,
+          displayName: profile?.displayName?.trim() || null,
+          avatarUrl,
+        });
+      }
+
+      const shareToken =
+        typeof session.shareToken === 'string' && session.shareToken.trim()
+          ? session.shareToken.trim()
+          : null;
+
+      sessions.push({
+        sessionId: session.sessionId,
+        shareToken,
+        isCommercial: session.isCommercial === true,
+        countryCode: session.countryCode,
+        regionId: session.regionId,
+        spotId: session.spotId,
+        sessionDate: session.sessionDate,
+        sessionTime: session.sessionTime?.trim() || '12:00',
+        durationMinutes:
+          typeof session.durationMinutes === 'number' &&
+          session.durationMinutes >= 15
+            ? session.durationMinutes
+            : 120,
+        conditionsRating: this.sessionToDto(session).conditionsRating,
+        waveTypes: this.sessionToDto(session).waveTypes,
+        regionName,
+        spotName,
+        author,
+        surfers,
+        videoCount: row.videoCount,
+        previewThumbnailUrls,
+      });
+    }
+
+    return { sessions };
   }
 }
