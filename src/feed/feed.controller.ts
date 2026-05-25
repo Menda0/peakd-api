@@ -23,8 +23,19 @@ export class FeedController {
     @AuthUserId() userId: string,
     @Query('limit') limit?: string,
     @Query('cursor') cursor?: string,
+    @Query('countryCode') countryCode?: string,
+    @Query('regionId') regionId?: string,
+    @Query('regionIds') regionIds?: string,
+    @Query('spotIds') spotIds?: string,
   ) {
-    return this.feed.listDiscoverFeed(userId, { limit, cursor });
+    return this.feed.listDiscoverFeed(userId, {
+      limit,
+      cursor,
+      countryCode,
+      regionId,
+      regionIds,
+      spotIds,
+    });
   }
 
   @Get('feed/my-videos')
@@ -62,12 +73,16 @@ export class FeedController {
     @Query('regionId') regionId?: string,
     @Query('spotId') spotId?: string,
     @Query('sessionDate') sessionDate?: string,
+    @Query('limit') limit?: string,
+    @Query('cursor') cursor?: string,
   ) {
     return this.feed.searchSessions(userId, {
       countryCode,
       regionId,
       spotId,
       sessionDate,
+      limit,
+      cursor,
     });
   }
 

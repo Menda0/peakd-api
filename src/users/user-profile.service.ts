@@ -15,6 +15,7 @@ export interface UserProfileResponseDto {
   nickname: string | null;
   countryCode: string | null;
   homeRegionId: string | null;
+  homeRegionName: string | null;
   surfLevel: SurfLevel | null;
   avatarUrl: string | null;
   peaksBalance: number;
@@ -91,7 +92,20 @@ export class UserProfileService {
     );
   }
 
+  private async resolveHomeRegionName(
+    countryCode: string | null,
+    homeRegionId: string | null,
+  ): Promise<string | null> {
+    if (!countryCode || !homeRegionId) return null;
+    const region = await this.studio.findRegionForCountry(
+      homeRegionId,
+      countryCode,
+    );
+    return region?.name?.trim() || null;
+  }
+
   private async toDto(doc: {
+    userId?: string;
     displayName: string | null;
     nickname: string | null;
     countryCode: string | null;
@@ -109,6 +123,10 @@ export class UserProfileService {
       nickname: doc.nickname,
       countryCode: doc.countryCode,
       homeRegionId: doc.homeRegionId,
+      homeRegionName: await this.resolveHomeRegionName(
+        doc.countryCode,
+        doc.homeRegionId,
+      ),
       surfLevel,
       avatarUrl: await this.resolveAvatarUrl(avatarKey),
       peaksBalance: Math.max(0, doc.peaksBalance ?? 0),
