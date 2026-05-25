@@ -76,6 +76,8 @@ export interface SearchSessionSurferDto {
 
 export interface SearchSessionDto {
   sessionId: string;
+  shareToken: string | null;
+  isCommercial: boolean;
   countryCode: string;
   regionId: string;
   spotId: string;
@@ -1808,8 +1810,15 @@ export class FeedService {
         });
       }
 
+      const shareToken =
+        typeof session.shareToken === 'string' && session.shareToken.trim()
+          ? session.shareToken.trim()
+          : null;
+
       sessions.push({
         sessionId: session.sessionId,
+        shareToken,
+        isCommercial: session.isCommercial === true,
         countryCode: session.countryCode,
         regionId: session.regionId,
         spotId: session.spotId,
