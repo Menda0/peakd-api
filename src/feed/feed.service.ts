@@ -1133,7 +1133,12 @@ export class FeedService {
 
   async listDiscoverFeed(
     viewerUserId: string,
-    options: { limit?: string; cursor?: string },
+    options: {
+      limit?: string;
+      cursor?: string;
+      countryCode?: string;
+      regionId?: string;
+    },
   ): Promise<DiscoverFeedPageDto> {
     const limit = this.parseLimit(options.limit);
     const cursorRaw = options.cursor?.trim();
@@ -1144,6 +1149,16 @@ export class FeedService {
         throw new BadRequestException('Invalid cursor');
       }
     }
+
+    const countryFilter = options.countryCode?.trim().toUpperCase();
+    const regionFilter = options.regionId?.trim();
+    if (countryFilter && !COUNTRY_CODE.test(countryFilter)) {
+      throw new BadRequestException('Invalid countryCode');
+    }
+    if (regionFilter && !countryFilter) {
+      throw new BadRequestException('countryCode is required when filtering by regionId');
+    }
+    const hasGeoFilter = Boolean(countryFilter || regionFilter);
 
     const pipeline: PipelineStage[] = [
       {
@@ -1216,6 +1231,13 @@ export class FeedService {
       },
     ];
 
+    if (hasGeoFilter) {
+      const geoMatch: Record<string, unknown> = {};
+      if (countryFilter) geoMatch['session.countryCode'] = countryFilter;
+      if (regionFilter) geoMatch['session.regionId'] = regionFilter;
+      pipeline.push({ $match: geoMatch } as PipelineStage);
+    }
+
     if (cursor) {
       pipeline.push({
         $match: buildCursorMatchFilter(cursor),
@@ -1242,7 +1264,7 @@ export class FeedService {
     let items = discoverItems;
     let mergedHasMore = hasMore;
 
-    if (cursor === null) {
+    if (cursor === null && !hasGeoFilter) {
       const pending = await this.listViewerProcessingPersonal(viewerUserId);
       const merged = [...pending, ...discoverItems].sort((a, b) => {
         const t = b.createdAt.localeCompare(a.createdAt);

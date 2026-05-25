@@ -23,8 +23,15 @@ export class FeedController {
     @AuthUserId() userId: string,
     @Query('limit') limit?: string,
     @Query('cursor') cursor?: string,
+    @Query('countryCode') countryCode?: string,
+    @Query('regionId') regionId?: string,
   ) {
-    return this.feed.listDiscoverFeed(userId, { limit, cursor });
+    return this.feed.listDiscoverFeed(userId, {
+      limit,
+      cursor,
+      countryCode,
+      regionId,
+    });
   }
 
   @Get('feed/my-videos')
