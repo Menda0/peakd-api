@@ -378,6 +378,52 @@ export class AdminPeaksService {
     }));
   }
 
+  async listAllByRegion(): Promise<AdminPeaksGeoRowDto[]> {
+    const rows = await this.waveUnlockPurchaseModel
+      .aggregate<{
+        _id: { countryCode: string; regionId: string };
+        transactionCount: number;
+        communityFeePeaks: number;
+        partnerPeaks: number;
+        totalPeaksCharged: number;
+      }>([
+        {
+          $match: {
+            countryCode: { $exists: true, $ne: '' },
+            regionId: {
+              $exists: true,
+              $ne: '',
+              $not: UNDISCLOSED_REGION_ID_PATTERN,
+            },
+          },
+        },
+        {
+          $group: {
+            _id: { countryCode: '$countryCode', regionId: '$regionId' },
+            transactionCount: { $sum: 1 },
+            communityFeePeaks: attributedCommunityFeePeaksExpr(),
+            partnerPeaks: { $sum: { $ifNull: ['$basePeaks', 0] } },
+            totalPeaksCharged: { $sum: { $ifNull: ['$peaksCharged', 0] } },
+          },
+        },
+        { $sort: { communityFeePeaks: -1 } },
+      ])
+      .exec();
+
+    const regionIds = [...new Set(rows.map((r) => r._id.regionId))];
+    const regionNameById = await this.regionNamesById(regionIds);
+
+    return rows.map((row) => ({
+      countryCode: row._id.countryCode,
+      regionId: row._id.regionId,
+      regionName: regionNameById.get(row._id.regionId) ?? null,
+      transactionCount: row.transactionCount,
+      communityFeePeaks: row.communityFeePeaks,
+      partnerPeaks: row.partnerPeaks,
+      totalPeaksCharged: row.totalPeaksCharged,
+    }));
+  }
+
   private async resolveAvatarUrl(avatarKey: string | null): Promise<string | null> {
     if (!avatarKey?.trim()) return null;
     const publicBase = this.config.get<string>('S3_PUBLIC_BASE_URL')?.trim();
