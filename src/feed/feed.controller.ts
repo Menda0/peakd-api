@@ -62,12 +62,16 @@ export class FeedController {
     @Query('regionId') regionId?: string,
     @Query('spotId') spotId?: string,
     @Query('sessionDate') sessionDate?: string,
+    @Query('limit') limit?: string,
+    @Query('cursor') cursor?: string,
   ) {
     return this.feed.searchSessions(userId, {
       countryCode,
       regionId,
       spotId,
       sessionDate,
+      limit,
+      cursor,
     });
   }
 
