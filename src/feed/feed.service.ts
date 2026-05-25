@@ -427,12 +427,18 @@ export class FeedService {
     const sponsorPricePeaks = settings
       ? computeCheckoutTotal(computeSponsorPeaks(settings, 1), checkoutOpts).totalPeaks
       : null;
+    // The session owner (partner) can't buy or sponsor their own wave: the
+    // backend rejects it because debit and credit would hit the same account
+    // and effectively make the purchase free (and not change their balance).
+    const viewerIsPartner = session.userId === viewerUserId;
     const canClaim =
-      claimStatus === 'none' && !unlockedFor;
-    const canBuyClaim = Boolean(settings && buyClaimPricePeaks != null);
+      claimStatus === 'none' && !unlockedFor && !viewerIsPartner;
+    const canBuyClaim =
+      Boolean(settings && buyClaimPricePeaks != null) && !viewerIsPartner;
     const canSponsor =
       Boolean(settings) &&
       !unlockedFor &&
+      !viewerIsPartner &&
       (claimStatus !== 'claimed' ||
         (Boolean(claimedBy) && claimedBy !== viewerUserId));
     return {
