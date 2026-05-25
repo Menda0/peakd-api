@@ -33,6 +33,14 @@ export class UserProfile {
   /** Virtual currency balance (peaks). */
   @Prop({ type: Number, default: 0, min: 0 })
   peaksBalance: number;
+
+  /**
+   * Partner-only withdrawable balance (Peaks). Credited from commercial wave
+   * unlocks; debited only on bank withdrawal. Kept separate from
+   * `peaksBalance` so partners cannot spend earnings before cashing out.
+   */
+  @Prop({ type: Number, default: 0, min: 0 })
+  partnerEarningsPeaks: number;
 }
 
 export const UserProfileSchema = SchemaFactory.createForClass(UserProfile);
