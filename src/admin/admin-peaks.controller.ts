@@ -41,9 +41,12 @@ export class AdminPeaksController {
 
   @Get('by-region')
   listByRegion(
-    @Query('countryCode') countryCode: string,
+    @Query('countryCode') countryCode?: string,
     @Query('regionId') regionId?: string,
   ) {
-    return this.peaks.listByRegion(countryCode ?? '', { regionId });
+    if (!countryCode?.trim()) {
+      return this.peaks.listAllByRegion();
+    }
+    return this.peaks.listByRegion(countryCode, { regionId });
   }
 }
