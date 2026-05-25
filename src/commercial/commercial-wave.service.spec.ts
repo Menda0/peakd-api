@@ -1,6 +1,8 @@
 import { BadRequestException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { getConnectionToken, getModelToken } from '@nestjs/mongoose';
 import { Test } from '@nestjs/testing';
+import { BILLING_CONFIG_KEY } from '../config/billing.config';
 import { undisclosedRegionId, undisclosedSpotId } from '../studio/geo-undisclosed';
 import { CommercialWaveService } from './commercial-wave.service';
 import { PartnerProfile } from '../partner/schemas/partner-profile.schema';
@@ -98,6 +100,12 @@ describe('CommercialWaveService', () => {
     surfSessionModel = { findOne: jest.fn() };
     const partnerProfileModel = { findOne: jest.fn() };
 
+    const configService = {
+      get: jest.fn((key: string) =>
+        key === BILLING_CONFIG_KEY ? { peaksPerEuro: 100 } : undefined,
+      ),
+    };
+
     const moduleRef = await Test.createTestingModule({
       providers: [
         CommercialWaveService,
@@ -110,6 +118,7 @@ describe('CommercialWaveService', () => {
           provide: getModelToken(WaveUnlockPurchase.name),
           useValue: waveUnlockPurchaseModel,
         },
+        { provide: ConfigService, useValue: configService },
       ],
     }).compile();
 
@@ -140,7 +149,7 @@ describe('CommercialWaveService', () => {
     );
     expect(userProfileModel.updateOne).toHaveBeenCalledWith(
       { userId: partnerUserId },
-      expect.objectContaining({ $inc: { partnerEarningsPeaks: 50 } }),
+      expect.objectContaining({ $inc: { partnerEarningsCents: 50 } }),
       expect.objectContaining({ session: mongoSession, upsert: true }),
     );
     expect(waveUnlockPurchaseModel.create).toHaveBeenCalledWith(
@@ -148,6 +157,7 @@ describe('CommercialWaveService', () => {
         expect.objectContaining({
           partnerUserId,
           basePeaks: 50,
+          partnerEarningsCents: 50,
           communityFeePeaks: 10,
           peaksCharged: 60,
           countryCode: 'PT',
@@ -262,6 +272,7 @@ describe('CommercialWaveService', () => {
         expect.objectContaining({
           peaksCharged: 50,
           basePeaks: 50,
+          partnerEarningsCents: 50,
           communityFeePeaks: 0,
         }),
       ],

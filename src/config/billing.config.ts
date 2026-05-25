@@ -12,8 +12,8 @@ export interface BillingConfigValues {
   /** Shared secret for BFF → API after Stripe signature is verified in Next.js */
   webhookInternalSecret: string;
   appBaseUrl: string;
-  /** Minimum partner withdrawal expressed in Peaks. */
-  partnerMinWithdrawalPeaks: number;
+  /** Minimum partner withdrawal expressed in EUR cents (e.g. 1000 = €10). */
+  partnerMinWithdrawalCents: number;
   /** Path appended to APP_BASE_URL for Connect onboarding return/refresh URLs. */
   partnerPayoutReturnPath: string;
 }
@@ -50,13 +50,29 @@ export const billingConfig = registerAs(
     ).trim(),
     webhookInternalSecret: (process.env.BILLING_WEBHOOK_INTERNAL_SECRET ?? '').trim(),
     appBaseUrl: (process.env.APP_BASE_URL ?? '').replace(/\/+$/, ''),
-    partnerMinWithdrawalPeaks: parsePositiveInt(
-      process.env.PARTNER_MIN_WITHDRAWAL_PEAKS,
-      1000,
-    ),
+    partnerMinWithdrawalCents: parsePartnerMinWithdrawalCents(),
     partnerPayoutReturnPath: parsePath(
       process.env.PARTNER_PAYOUT_RETURN_PATH,
       '/partner/income',
     ),
   }),
 );
+
+/**
+ * Reads the partner minimum withdrawal in EUR cents. Falls back to converting
+ * the legacy `PARTNER_MIN_WITHDRAWAL_PEAKS` env (deprecated, may be removed)
+ * via `PEAKS_PER_EURO` so existing deployments don't break during the pivot.
+ */
+function parsePartnerMinWithdrawalCents(): number {
+  const directRaw = process.env.PARTNER_MIN_WITHDRAWAL_CENTS;
+  if (directRaw != null && directRaw.trim() !== '') {
+    return parsePositiveInt(directRaw, 1000);
+  }
+  const legacyPeaks = process.env.PARTNER_MIN_WITHDRAWAL_PEAKS;
+  if (legacyPeaks != null && legacyPeaks.trim() !== '') {
+    const peaks = parsePositiveInt(legacyPeaks, 1000);
+    const peaksPerEuro = parsePositiveInt(process.env.PEAKS_PER_EURO, 100);
+    return Math.max(1, Math.floor((peaks * 100) / peaksPerEuro));
+  }
+  return 1000;
+}

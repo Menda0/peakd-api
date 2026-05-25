@@ -32,9 +32,19 @@ export class WaveUnlockPurchase {
   @Prop({ required: true, index: true })
   partnerUserId: string;
 
-  /** List price after volume discount — credited to partner. */
+  /** List price after volume discount, expressed in Peaks (buyer-side). */
   @Prop({ required: true })
   basePeaks: number;
+
+  /**
+   * Money credited to the partner for this unlock, in EUR cents. Persisted
+   * at unlock time so historical earnings remain stable across future
+   * `peaksPerEuro` rate changes. Optional/null on rows created before the
+   * partner pivot — read paths fall back to `floor(basePeaks * 100 /
+   * peaksPerEuro)` for those.
+   */
+  @Prop({ type: Number, default: null })
+  partnerEarningsCents: number | null;
 
   /** Community fee portion — attributed to session geo for reporting. */
   @Prop({ required: true })

@@ -2,10 +2,16 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import type { Connection, Model } from 'mongoose';
+import {
+  BILLING_CONFIG_KEY,
+  type BillingConfigValues,
+} from '../config/billing.config';
 import { PartnerProfile } from '../partner/schemas/partner-profile.schema';
 import { SurfSession } from '../studio/schemas/surf-session.schema';
 import { UserProfile } from '../users/schemas/user-profile.schema';
@@ -61,7 +67,25 @@ export class CommercialWaveService {
     private readonly userProfileModel: Model<UserProfile>,
     @InjectModel(WaveUnlockPurchase.name)
     private readonly waveUnlockPurchaseModel: Model<WaveUnlockPurchase>,
+    private readonly config: ConfigService,
   ) {}
+
+  private peaksPerEuro(): number {
+    const billing = this.config.get<BillingConfigValues>(BILLING_CONFIG_KEY);
+    const rate = billing?.peaksPerEuro;
+    if (!rate || rate <= 0) {
+      throw new InternalServerErrorException(
+        'PEAKS_PER_EURO is not configured',
+      );
+    }
+    return rate;
+  }
+
+  /** Money the partner earns from a single unlock, derived from base peaks. */
+  private partnerEarningsCents(basePeaks: number): number {
+    if (basePeaks <= 0) return 0;
+    return Math.floor((basePeaks * 100) / this.peaksPerEuro());
+  }
 
   private isCompleted(doc: { status?: string; processedKey?: string | null }): boolean {
     if (doc.status === 'completed') return true;
@@ -134,6 +158,7 @@ export class CommercialWaveService {
       type: 'buy_claim' | 'sponsor';
       peaksCharged: number;
       basePeaks: number;
+      partnerEarningsCents: number;
       communityFeePeaks: number;
       discountPercent: number;
       createdAt: string;
@@ -174,22 +199,25 @@ export class CommercialWaveService {
   }
 
   /**
-   * Credits partner earnings into the dedicated `partnerEarningsPeaks` field
-   * so partners cannot spend earnings before withdrawing them via Stripe.
-   * Earnings are converted to EUR and paid out through the payouts module.
+   * Credits the partner's withdrawable balance in EUR cents. Partners never
+   * accrue Peaks — Peaks are buyer-side currency only — so we convert the
+   * base Peaks list price into cents at unlock time using the current rate
+   * and persist the money directly to `partnerEarningsCents`.
    */
-  private async creditPartnerEarnings(
+  private async creditPartnerEarningsCents(
     userId: string,
-    amount: number,
+    amountCents: number,
     mongoSession: import('mongoose').ClientSession,
   ): Promise<void> {
-    if (amount < 1) {
-      throw new BadRequestException('Invalid Peaks credit amount');
+    if (amountCents < 1) {
+      // Sub-cent unlocks (e.g. very low list price) round down to 0 — skip
+      // the write rather than spamming a no-op increment.
+      return;
     }
     await this.userProfileModel.updateOne(
       { userId },
       {
-        $inc: { partnerEarningsPeaks: amount },
+        $inc: { partnerEarningsCents: amountCents },
         $setOnInsert: {
           userId,
           displayName: null,
@@ -230,6 +258,7 @@ export class CommercialWaveService {
     );
     const checkout = computeCheckoutTotal(basePeaks, this.checkoutOptions(ctx));
     const { totalPeaks, communityFeePeaks } = checkout;
+    const partnerEarningsCents = this.partnerEarningsCents(basePeaks);
     const claimedAt = new Date().toISOString();
     const unlockedAt = claimedAt;
 
@@ -237,7 +266,11 @@ export class CommercialWaveService {
     mongoSession.startTransaction();
     try {
       await this.debitPeaks(buyerUserId, totalPeaks, mongoSession);
-      await this.creditPartnerEarnings(partnerUserId, basePeaks, mongoSession);
+      await this.creditPartnerEarningsCents(
+        partnerUserId,
+        partnerEarningsCents,
+        mongoSession,
+      );
 
       await this.videoJobModel
         .updateOne(
@@ -265,6 +298,7 @@ export class CommercialWaveService {
             type: 'buy_claim',
             peaksCharged: totalPeaks,
             basePeaks,
+            partnerEarningsCents,
             communityFeePeaks,
             discountPercent,
             createdAt: unlockedAt,
@@ -339,8 +373,14 @@ export class CommercialWaveService {
       (sum, line) => sum + line.totalPeaks,
       0,
     );
-    const partnerBaseTotal = lineBreakdowns.reduce(
-      (sum, line) => sum + line.basePeaks,
+    // Compute cents per line (floor each independently) so the ledger total
+    // matches what we credit to the partner — avoids a one-cent rounding
+    // discrepancy across many lines vs. computing once on the sum.
+    const partnerEarningsCentsPerLine = lineBreakdowns.map((line) =>
+      this.partnerEarningsCents(line.basePeaks),
+    );
+    const partnerEarningsCentsTotal = partnerEarningsCentsPerLine.reduce(
+      (sum, c) => sum + c,
       0,
     );
     const claimedAt = new Date().toISOString();
@@ -351,9 +391,9 @@ export class CommercialWaveService {
     mongoSession.startTransaction();
     try {
       await this.debitPeaks(buyerUserId, peaksCharged, mongoSession);
-      await this.creditPartnerEarnings(
+      await this.creditPartnerEarningsCents(
         partnerUserId,
-        partnerBaseTotal,
+        partnerEarningsCentsTotal,
         mongoSession,
       );
 
@@ -389,6 +429,7 @@ export class CommercialWaveService {
               type: 'buy_claim',
               peaksCharged: line.totalPeaks,
               basePeaks: line.basePeaks,
+              partnerEarningsCents: partnerEarningsCentsPerLine[i]!,
               communityFeePeaks: line.communityFeePeaks,
               discountPercent,
               createdAt: unlockedAt,
@@ -466,6 +507,7 @@ export class CommercialWaveService {
     const sponsorBase = computeSponsorPeaks(ctx.settings, 1);
     const checkout = computeCheckoutTotal(sponsorBase, this.checkoutOptions(ctx));
     const { totalPeaks: peaksCharged, communityFeePeaks } = checkout;
+    const partnerEarningsCents = this.partnerEarningsCents(sponsorBase);
     const unlockedAt = new Date().toISOString();
     const partnerUserId = ctx.session.userId;
 
@@ -473,9 +515,9 @@ export class CommercialWaveService {
     mongoSession.startTransaction();
     try {
       await this.debitPeaks(sponsorUserId, peaksCharged, mongoSession);
-      await this.creditPartnerEarnings(
+      await this.creditPartnerEarningsCents(
         partnerUserId,
-        sponsorBase,
+        partnerEarningsCents,
         mongoSession,
       );
 
@@ -507,6 +549,7 @@ export class CommercialWaveService {
             type: 'sponsor',
             peaksCharged,
             basePeaks: sponsorBase,
+            partnerEarningsCents,
             communityFeePeaks,
             discountPercent: 0,
             createdAt: unlockedAt,

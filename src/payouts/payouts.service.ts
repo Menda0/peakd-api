@@ -27,10 +27,7 @@ const COUNTRY_CODE = /^[A-Z]{2}$/;
 export type PartnerOnboardingStatus = 'not_started' | 'pending' | 'enabled';
 
 export interface PartnerPayoutsStatusDto {
-  withdrawablePeaks: number;
-  peaksPerEuro: number;
   withdrawableAmountCents: number;
-  minWithdrawalPeaks: number;
   minWithdrawalAmountCents: number;
   currency: 'eur';
   onboardingStatus: PartnerOnboardingStatus;
@@ -41,7 +38,6 @@ export interface PartnerPayoutsStatusDto {
 
 export interface PartnerWithdrawalDto {
   id: string;
-  peaksDebited: number;
   amountCents: number;
   currency: string;
   status: PartnerWithdrawalStatus;
@@ -52,8 +48,7 @@ export interface PartnerWithdrawalDto {
 export interface PartnerEarningRowDto {
   id: string;
   jobId: string;
-  basePeaks: number;
-  peaksCharged: number;
+  amountCents: number;
   countryCode: string;
   regionId: string;
   type: string;
@@ -101,10 +96,6 @@ export class PayoutsService {
     return this.stripeClient;
   }
 
-  private peaksToCents(peaks: number, peaksPerEuro: number): number {
-    return Math.floor((peaks * 100) / peaksPerEuro);
-  }
-
   private async loadPartner(userId: string): Promise<{
     stripeConnectAccountId: string | null;
     stripeConnectPayoutsEnabled: boolean;
@@ -129,18 +120,17 @@ export class PayoutsService {
     };
   }
 
-  private async getEarningsPeaks(userId: string): Promise<number> {
+  private async getEarningsCents(userId: string): Promise<number> {
     const doc = await this.userProfileModel
       .findOne({ userId })
-      .select({ partnerEarningsPeaks: 1 })
+      .select({ partnerEarningsCents: 1 })
       .lean()
       .exec();
-    return Math.max(0, doc?.partnerEarningsPeaks ?? 0);
+    return Math.max(0, doc?.partnerEarningsCents ?? 0);
   }
 
   private toWithdrawalDto(doc: {
     _id: unknown;
-    peaksDebited: number;
     amountCents: number;
     currency: string;
     status: PartnerWithdrawalStatus;
@@ -149,7 +139,6 @@ export class PayoutsService {
   }): PartnerWithdrawalDto {
     return {
       id: String(doc._id),
-      peaksDebited: doc.peaksDebited,
       amountCents: doc.amountCents,
       currency: doc.currency,
       status: doc.status,
@@ -175,16 +164,17 @@ export class PayoutsService {
 
   async getStatus(userId: string): Promise<PartnerPayoutsStatusDto> {
     const b = this.billing();
-    const [partnerInitial, withdrawablePeaks, recentDocs] = await Promise.all([
-      this.loadPartner(userId),
-      this.getEarningsPeaks(userId),
-      this.partnerWithdrawalModel
-        .find({ userId })
-        .sort({ createdAt: -1 })
-        .limit(10)
-        .lean()
-        .exec(),
-    ]);
+    const [partnerInitial, withdrawableAmountCents, recentDocs] =
+      await Promise.all([
+        this.loadPartner(userId),
+        this.getEarningsCents(userId),
+        this.partnerWithdrawalModel
+          .find({ userId })
+          .sort({ createdAt: -1 })
+          .limit(10)
+          .lean()
+          .exec(),
+      ]);
 
     // Webhooks (`account.updated`) are eventually consistent, so when the user
     // just returned from Stripe Connect onboarding the cached flags may still
@@ -196,7 +186,6 @@ export class PayoutsService {
     const recentWithdrawals = recentDocs.map((d) =>
       this.toWithdrawalDto({
         _id: d._id,
-        peaksDebited: d.peaksDebited,
         amountCents: d.amountCents,
         currency: d.currency,
         status: d.status,
@@ -206,17 +195,8 @@ export class PayoutsService {
     );
 
     return {
-      withdrawablePeaks,
-      peaksPerEuro: b.peaksPerEuro,
-      withdrawableAmountCents: this.peaksToCents(
-        withdrawablePeaks,
-        b.peaksPerEuro,
-      ),
-      minWithdrawalPeaks: b.partnerMinWithdrawalPeaks,
-      minWithdrawalAmountCents: this.peaksToCents(
-        b.partnerMinWithdrawalPeaks,
-        b.peaksPerEuro,
-      ),
+      withdrawableAmountCents,
+      minWithdrawalAmountCents: b.partnerMinWithdrawalCents,
       currency: 'eur',
       onboardingStatus: this.resolveOnboardingStatus(partner),
       payoutsEnabled: partner.stripeConnectPayoutsEnabled,
@@ -254,6 +234,7 @@ export class PayoutsService {
     userId: string,
     options: { limit?: number; cursor?: string } = {},
   ): Promise<PartnerEarningsPageDto> {
+    const b = this.billing();
     const limit = Math.min(100, Math.max(1, options.limit ?? 20));
     const query: Record<string, unknown> = { partnerUserId: userId };
     if (options.cursor?.trim()) {
@@ -268,16 +249,26 @@ export class PayoutsService {
       .exec();
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
-    const items: PartnerEarningRowDto[] = page.map((row) => ({
-      id: String(row._id),
-      jobId: row.jobId,
-      basePeaks: row.basePeaks ?? 0,
-      peaksCharged: row.peaksCharged ?? 0,
-      countryCode: row.countryCode ?? '',
-      regionId: row.regionId ?? '',
-      type: row.type,
-      createdAt: row.createdAt,
-    }));
+    const items: PartnerEarningRowDto[] = page.map((row) => {
+      // New rows persist `partnerEarningsCents` at unlock time; legacy rows
+      // pre-dating the pivot don't, so fall back to the live conversion.
+      const persistedCents =
+        typeof row.partnerEarningsCents === 'number'
+          ? row.partnerEarningsCents
+          : null;
+      const amountCents =
+        persistedCents ??
+        Math.floor(((row.basePeaks ?? 0) * 100) / b.peaksPerEuro);
+      return {
+        id: String(row._id),
+        jobId: row.jobId,
+        amountCents,
+        countryCode: row.countryCode ?? '',
+        regionId: row.regionId ?? '',
+        type: row.type,
+        createdAt: row.createdAt,
+      };
+    });
     const nextCursor = hasMore
       ? (page[page.length - 1]!.createdAt ?? null)
       : null;
@@ -346,22 +337,21 @@ export class PayoutsService {
   }
 
   /**
-   * Debits `partnerEarningsPeaks`, persists a pending withdrawal, then creates
+   * Debits `partnerEarningsCents`, persists a pending withdrawal, then creates
    * a Stripe Transfer to the connected account. On Stripe failure the debit is
    * reverted and the withdrawal is marked failed.
    */
   async requestWithdrawal(
     userId: string,
-    peaksAmount: number,
+    amountCents: number,
   ): Promise<PartnerWithdrawalDto> {
-    if (!Number.isInteger(peaksAmount) || peaksAmount < 1) {
-      throw new BadRequestException('peaksAmount must be a positive integer');
+    if (!Number.isInteger(amountCents) || amountCents < 1) {
+      throw new BadRequestException('amountCents must be a positive integer');
     }
     const b = this.billing();
-    if (peaksAmount < b.partnerMinWithdrawalPeaks) {
-      throw new BadRequestException(
-        `Minimum withdrawal is ${b.partnerMinWithdrawalPeaks} Peaks`,
-      );
+    if (amountCents < b.partnerMinWithdrawalCents) {
+      const min = (b.partnerMinWithdrawalCents / 100).toFixed(2);
+      throw new BadRequestException(`Minimum withdrawal is €${min}`);
     }
 
     const partner = await this.loadPartner(userId);
@@ -379,11 +369,6 @@ export class PayoutsService {
       );
     }
 
-    const amountCents = this.peaksToCents(peaksAmount, b.peaksPerEuro);
-    if (amountCents < 1) {
-      throw new BadRequestException('Withdrawal amount must be at least 1 cent');
-    }
-
     const idempotencyKey = `wd_${userId}_${randomUUID()}`;
     const stripeAccountId = partner.stripeConnectAccountId;
 
@@ -393,24 +378,22 @@ export class PayoutsService {
     try {
       const debited = await this.userProfileModel
         .findOneAndUpdate(
-          { userId, partnerEarningsPeaks: { $gte: peaksAmount } },
-          { $inc: { partnerEarningsPeaks: -peaksAmount } },
+          { userId, partnerEarningsCents: { $gte: amountCents } },
+          { $inc: { partnerEarningsCents: -amountCents } },
           { session: mongoSession, returnDocument: 'after' },
         )
         .lean()
         .exec();
       if (!debited) {
-        throw new BadRequestException('Insufficient withdrawable Peaks');
+        throw new BadRequestException('Insufficient withdrawable balance');
       }
       const created = await this.partnerWithdrawalModel.create(
         [
           {
             userId,
             stripeAccountId,
-            peaksDebited: peaksAmount,
             amountCents,
             currency: 'eur',
-            peaksPerEuro: b.peaksPerEuro,
             idempotencyKey,
             stripeTransferId: null,
             status: 'pending',
@@ -439,12 +422,11 @@ export class PayoutsService {
           amount: amountCents,
           currency: 'eur',
           destination: stripeAccountId,
-          description: `Peakd partner withdrawal (${peaksAmount} Peaks)`,
+          description: `Peakd partner withdrawal (€${(amountCents / 100).toFixed(2)})`,
           metadata: {
             userId,
             withdrawalId,
-            peaksDebited: String(peaksAmount),
-            peaksPerEuro: String(b.peaksPerEuro),
+            amountCents: String(amountCents),
           },
         },
         { idempotencyKey },
@@ -453,7 +435,7 @@ export class PayoutsService {
       await this.refundFailedWithdrawal(
         userId,
         withdrawalId,
-        peaksAmount,
+        amountCents,
         err instanceof Error ? err.message : 'Stripe transfer failed',
       );
       const msg = err instanceof Error ? err.message : 'Stripe transfer failed';
@@ -479,7 +461,6 @@ export class PayoutsService {
     }
     return this.toWithdrawalDto({
       _id: updated._id,
-      peaksDebited: updated.peaksDebited,
       amountCents: updated.amountCents,
       currency: updated.currency,
       status: updated.status,
@@ -492,7 +473,7 @@ export class PayoutsService {
   private async refundFailedWithdrawal(
     userId: string,
     withdrawalId: string,
-    peaks: number,
+    amountCents: number,
     reason: string,
   ): Promise<void> {
     const mongoSession = await this.connection.startSession();
@@ -501,7 +482,7 @@ export class PayoutsService {
       await this.userProfileModel
         .updateOne(
           { userId },
-          { $inc: { partnerEarningsPeaks: peaks } },
+          { $inc: { partnerEarningsCents: amountCents } },
           { session: mongoSession },
         )
         .exec();
