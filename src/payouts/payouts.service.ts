@@ -175,7 +175,7 @@ export class PayoutsService {
 
   async getStatus(userId: string): Promise<PartnerPayoutsStatusDto> {
     const b = this.billing();
-    const [partner, withdrawablePeaks, recentDocs] = await Promise.all([
+    const [partnerInitial, withdrawablePeaks, recentDocs] = await Promise.all([
       this.loadPartner(userId),
       this.getEarningsPeaks(userId),
       this.partnerWithdrawalModel
@@ -185,6 +185,13 @@ export class PayoutsService {
         .lean()
         .exec(),
     ]);
+
+    // Webhooks (`account.updated`) are eventually consistent, so when the user
+    // just returned from Stripe Connect onboarding the cached flags may still
+    // be stale. Reconcile live against Stripe whenever we have an account but
+    // haven't seen it become fully enabled yet — this is the recommended
+    // pattern over relying solely on the webhook.
+    const partner = await this.reconcileConnectAccount(userId, partnerInitial);
 
     const recentWithdrawals = recentDocs.map((d) =>
       this.toWithdrawalDto({
@@ -216,6 +223,31 @@ export class PayoutsService {
       requirementsDue: partner.stripeConnectRequirementsDue,
       recentWithdrawals,
     };
+  }
+
+  private async reconcileConnectAccount(
+    userId: string,
+    partner: Awaited<ReturnType<PayoutsService['loadPartner']>>,
+  ): Promise<Awaited<ReturnType<PayoutsService['loadPartner']>>> {
+    if (!partner.stripeConnectAccountId) return partner;
+    const cachedEnabled =
+      partner.stripeConnectPayoutsEnabled &&
+      partner.stripeConnectRequirementsDue.length === 0;
+    if (cachedEnabled) return partner;
+    try {
+      const live = await this.stripe().accounts.retrieve(
+        partner.stripeConnectAccountId,
+      );
+      await this.syncConnectAccountFromEvent(live);
+      return await this.loadPartner(userId);
+    } catch (err) {
+      this.logger.warn(
+        `Failed to refresh Stripe Connect account ${partner.stripeConnectAccountId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return partner;
+    }
   }
 
   async listEarnings(
