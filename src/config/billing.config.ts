@@ -7,6 +7,8 @@ export interface BillingConfigValues {
   platformFeePercent: number;
   stripeSecretKey: string;
   stripeWebhookSecret: string;
+  /** Shared secret for BFF → API after Stripe signature is verified in Next.js */
+  webhookInternalSecret: string;
   appBaseUrl: string;
 }
 
@@ -31,6 +33,7 @@ export const billingConfig = registerAs(
     platformFeePercent: parseFeePercent(process.env.PLATFORM_FEE_PERCENT),
     stripeSecretKey: (process.env.STRIPE_SECRET_KEY ?? '').trim(),
     stripeWebhookSecret: (process.env.STRIPE_WEBHOOK_SECRET ?? '').trim(),
+    webhookInternalSecret: (process.env.BILLING_WEBHOOK_INTERNAL_SECRET ?? '').trim(),
     appBaseUrl: (process.env.APP_BASE_URL ?? '').replace(/\/+$/, ''),
   }),
 );

@@ -1,6 +1,5 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
-import { json } from 'express';
 import { AppModule } from './app.module';
 
 function parseCorsOrigins(): string[] | undefined {
@@ -22,17 +21,6 @@ async function bootstrap() {
     methods: ['GET', 'POST', 'PATCH', 'PUT', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Accept', 'Authorization', 'stripe-signature'],
   });
-
-  app.use(
-    json({
-      verify: (req, _res, buf) => {
-        const url = req.url ?? '';
-        if (url.startsWith('/billing/stripe/webhook')) {
-          (req as { rawBody?: Buffer }).rawBody = buf;
-        }
-      },
-    }),
-  );
 
   const port = process.env.PORT ?? '3001';
   await app.listen(Number(port));

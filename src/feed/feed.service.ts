@@ -9,9 +9,11 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, PipelineStage } from 'mongoose';
 import { S3Service } from '../s3/s3.service';
 import {
+  isSessionLocationUndisclosed,
   isUndisclosedRegionId,
   isUndisclosedSpotId,
 } from '../studio/geo-undisclosed';
+import type { CheckoutOptions } from '../commercial/commercial-pricing';
 import { Region } from '../studio/schemas/region.schema';
 import { Spot } from '../studio/schemas/spot.schema';
 import { SurfSession } from '../studio/schemas/surf-session.schema';
@@ -347,11 +349,28 @@ export class FeedService {
     return urls;
   }
 
+  private checkoutOptionsForSession(session: {
+    countryCode: string;
+    regionId: string;
+    spotId: string;
+  }): CheckoutOptions {
+    return {
+      waiveCommunityFee: isSessionLocationUndisclosed(
+        session.countryCode,
+        session.regionId,
+        session.spotId,
+      ),
+    };
+  }
+
   private commercialExtras(
     session: {
       isCommercial?: boolean;
       commercialSettings?: unknown;
       userId: string;
+      countryCode: string;
+      regionId: string;
+      spotId: string;
     },
     partner: { commercialSettings?: unknown } | null,
     job: {
@@ -397,12 +416,16 @@ export class FeedService {
     const unlockedFor = job.videoUnlockedForUserId?.trim() || null;
     const claimedBy = job.claimedByUserId?.trim() || null;
     const videoUnlockedByViewer = unlockedFor === viewerUserId;
+    const checkoutOpts = this.checkoutOptionsForSession(session);
     const wavePricePeaks = settings?.videoPricePeaks ?? null;
     const buyClaimPricePeaks = settings
-      ? computeCheckoutTotal(computeBuyClaimPeaks(settings, 1).totalPeaks).totalPeaks
+      ? computeCheckoutTotal(
+          computeBuyClaimPeaks(settings, 1).totalPeaks,
+          checkoutOpts,
+        ).totalPeaks
       : null;
     const sponsorPricePeaks = settings
-      ? computeCheckoutTotal(computeSponsorPeaks(settings, 1)).totalPeaks
+      ? computeCheckoutTotal(computeSponsorPeaks(settings, 1), checkoutOpts).totalPeaks
       : null;
     const canClaim =
       claimStatus === 'none' && !unlockedFor;
@@ -541,12 +564,16 @@ export class FeedService {
     const buyClaimBySession = new Map<string, Loaded[]>();
 
     for (const row of loaded) {
+      const checkoutOpts: CheckoutOptions = {
+        waiveCommunityFee: row.sessionMeta.isUndisclosed,
+      };
       if (row.intent === 'sponsor') {
         const sponsorBase = computeSponsorPeaks(row.ctx.settings, 1);
         const priced = checkoutBreakdownWithDiscount(
           sponsorBase,
           row.ctx.settings.videoPricePeaks,
           0,
+          checkoutOpts,
         );
         lines.push({
           jobId: row.jobId,
@@ -574,7 +601,14 @@ export class FeedService {
     for (const [, group] of buyClaimBySession) {
       group.sort((a, b) => a.jobId.localeCompare(b.jobId));
       const settings = group[0]!.ctx.settings;
-      const pricedLines = allocateBuyClaimLineBreakdowns(settings, group.length);
+      const checkoutOpts: CheckoutOptions = {
+        waiveCommunityFee: group[0]!.sessionMeta.isUndisclosed,
+      };
+      const pricedLines = allocateBuyClaimLineBreakdowns(
+        settings,
+        group.length,
+        checkoutOpts,
+      );
       for (let i = 0; i < group.length; i += 1) {
         const row = group[i]!;
         const priced = pricedLines[i]!;
@@ -685,23 +719,27 @@ export class FeedService {
       doc,
       viewerUserId,
     );
+    const countryCode = session.countryCode;
+    const isUndisclosed = isSessionLocationUndisclosed(
+      countryCode,
+      session.regionId,
+      session.spotId,
+    );
+    const checkoutOpts: CheckoutOptions = { waiveCommunityFee: isUndisclosed };
     const buyClaimPriced = computeBuyClaimPeaks(settings, 1);
     const sponsorBase = computeSponsorPeaks(settings, 1);
     const buyClaim = checkoutBreakdownWithDiscount(
       buyClaimPriced.totalPeaks,
       settings.videoPricePeaks,
       buyClaimPriced.discountPercent,
+      checkoutOpts,
     );
     const sponsor = checkoutBreakdownWithDiscount(
       sponsorBase,
       settings.videoPricePeaks,
       0,
+      checkoutOpts,
     );
-
-    const countryCode = session.countryCode;
-    const isUndisclosed =
-      isUndisclosedRegionId(session.regionId, countryCode) ||
-      isUndisclosedSpotId(session.spotId, countryCode);
     const regionName =
       region?.name?.trim() ||
       (isUndisclosedRegionId(session.regionId, countryCode) ? 'Undisclosed' : 'Unknown');
@@ -744,10 +782,10 @@ export class FeedService {
         canBuyClaim: rowExtras.canBuyClaim,
         canSponsor: rowExtras.canSponsor,
         buyClaimTotalPeaks: rowExtras.canBuyClaim
-          ? computeCheckoutTotal(rowBuyBase).totalPeaks
+          ? computeCheckoutTotal(rowBuyBase, checkoutOpts).totalPeaks
           : null,
         sponsorTotalPeaks: rowExtras.canSponsor
-          ? computeCheckoutTotal(rowSponsorBase).totalPeaks
+          ? computeCheckoutTotal(rowSponsorBase, checkoutOpts).totalPeaks
           : null,
       });
     }
@@ -925,6 +963,21 @@ export class FeedService {
     return null;
   }
 
+  private async resolveDiscoverPlaybackUrl(
+    processedKey: string | null | undefined,
+    status: VideoJobStatus,
+    isCommercial: boolean,
+    videoUnlockedByViewer: boolean,
+  ): Promise<string | null> {
+    if (status !== 'completed' || !processedKey?.trim()) {
+      return null;
+    }
+    if (isCommercial && !videoUnlockedByViewer) {
+      return null;
+    }
+    return this.s3.presignedGetUrl(processedKey);
+  }
+
   private async resolveFeedSurfer(doc: {
     userId: string;
     claimStatus?: VideoClaimStatus;
@@ -1066,7 +1119,7 @@ export class FeedService {
         claimStatus: dto.claimStatus,
         discoverPublishedAt: doc.discoverPublishedAt ?? null,
         uploadSource: doc.uploadSource === 'personal' ? 'personal' : 'studio',
-        surfer: isViewerSurfer ? surfer : null,
+        surfer: dto.surfer ?? (isViewerSurfer ? surfer : null),
         filmedBy,
         isCommercial: dto.isCommercial,
         snapshotUrls: dto.snapshotUrls,
@@ -1309,14 +1362,16 @@ export class FeedService {
     );
     extras.snapshotUrls = snapshotUrls;
 
-    let videoUrl: string | null = null;
+    const videoUrl = await this.resolveDiscoverPlaybackUrl(
+      doc.processedKey,
+      status,
+      isCommercial,
+      extras.videoUnlockedByViewer,
+    );
     let thumbnailUrl: string | null = null;
-    if (status === 'completed' && doc.processedKey && !isCommercial) {
-      videoUrl = await this.s3.presignedGetUrl(doc.processedKey);
-      const snapKey = doc.snapshotKeys?.[0];
-      if (snapKey) {
-        thumbnailUrl = await this.s3.presignedGetUrl(snapKey);
-      }
+    const snapKey = doc.snapshotKeys?.[0];
+    if (snapKey) {
+      thumbnailUrl = await this.s3.presignedGetUrl(snapKey);
     } else if (snapshotUrls[0]) {
       thumbnailUrl = snapshotUrls[0];
     }
@@ -1389,14 +1444,17 @@ export class FeedService {
     );
     extras.snapshotUrls = snapshotUrls;
 
-    let videoUrl: string | null = null;
+    const status = this.normalizeStatus(row);
+    const videoUrl = await this.resolveDiscoverPlaybackUrl(
+      row.processedKey,
+      status,
+      isCommercial,
+      extras.videoUnlockedByViewer,
+    );
     let thumbnailUrl: string | null = null;
-    if (!isCommercial && row.processedKey) {
-      videoUrl = await this.s3.presignedGetUrl(row.processedKey);
-      const snapKey = row.snapshotKeys?.[0];
-      if (snapKey) {
-        thumbnailUrl = await this.s3.presignedGetUrl(snapKey);
-      }
+    const snapKey = row.snapshotKeys?.[0];
+    if (snapKey) {
+      thumbnailUrl = await this.s3.presignedGetUrl(snapKey);
     } else if (snapshotUrls[0]) {
       thumbnailUrl = snapshotUrls[0];
     }
@@ -1414,7 +1472,7 @@ export class FeedService {
     return {
       jobId: row.jobId,
       createdAt: row.createdAt,
-      status: this.normalizeStatus(row),
+      status,
       videoUrl,
       thumbnailUrl,
       author,

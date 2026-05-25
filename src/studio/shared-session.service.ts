@@ -17,6 +17,7 @@ import { UserProfile } from '../users/schemas/user-profile.schema';
 import { S3Service } from '../s3/s3.service';
 import { VideoJob } from '../video/schemas/video-job.schema';
 import {
+  isSessionLocationUndisclosed,
   isUndisclosedRegionId,
   isUndisclosedSpotId,
 } from './geo-undisclosed';
@@ -233,13 +234,23 @@ export class SharedSessionService {
     const unlockedFor = doc.videoUnlockedForUserId?.trim() || null;
     const claimedBy = doc.claimedByUserId?.trim() || null;
     const videoUnlockedByViewer = unlockedFor === viewerUserId;
+    const checkoutOpts = {
+      waiveCommunityFee: isSessionLocationUndisclosed(
+        session.countryCode,
+        session.regionId,
+        session.spotId,
+      ),
+    };
     const wavePricePeaks = settings?.videoPricePeaks ?? null;
     const buyClaimPricePeaks = settings
-      ? computeCheckoutTotal(computeBuyClaimPeaks(settings, 1).totalPeaks)
-          .totalPeaks
+      ? computeCheckoutTotal(
+          computeBuyClaimPeaks(settings, 1).totalPeaks,
+          checkoutOpts,
+        ).totalPeaks
       : null;
     const sponsorPricePeaks = settings
-      ? computeCheckoutTotal(computeSponsorPeaks(settings, 1)).totalPeaks
+      ? computeCheckoutTotal(computeSponsorPeaks(settings, 1), checkoutOpts)
+          .totalPeaks
       : null;
     const canClaim = claimStatus === 'none' && !unlockedFor;
     const canBuyClaim = Boolean(settings && buyClaimPricePeaks != null);
