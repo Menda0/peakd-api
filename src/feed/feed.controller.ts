@@ -25,12 +25,16 @@ export class FeedController {
     @Query('cursor') cursor?: string,
     @Query('countryCode') countryCode?: string,
     @Query('regionId') regionId?: string,
+    @Query('regionIds') regionIds?: string,
+    @Query('spotIds') spotIds?: string,
   ) {
     return this.feed.listDiscoverFeed(userId, {
       limit,
       cursor,
       countryCode,
       regionId,
+      regionIds,
+      spotIds,
     });
   }
 
