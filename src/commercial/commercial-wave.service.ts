@@ -211,6 +211,16 @@ export class CommercialWaveService {
     discountPercent: number;
   }> {
     const ctx = await this.loadCommercialContext(jobId);
+    const partnerUserId = ctx.session.userId;
+    if (buyerUserId === partnerUserId) {
+      // Without this guard, debitPeaks and creditPeaks both target the same
+      // user document inside the transaction and the two $inc ops cancel out
+      // (partially, or fully at undisclosed locations), so the buyer's Peaks
+      // balance appears unchanged after a successful purchase.
+      throw new BadRequestException(
+        "You can't buy and claim your own session's wave",
+      );
+    }
     const { totalPeaks: basePeaks, discountPercent } = computeBuyClaimPeaks(
       ctx.settings,
       quantity,
@@ -219,7 +229,6 @@ export class CommercialWaveService {
     const { totalPeaks, communityFeePeaks } = checkout;
     const claimedAt = new Date().toISOString();
     const unlockedAt = claimedAt;
-    const partnerUserId = ctx.session.userId;
 
     const mongoSession = await this.connection.startSession();
     mongoSession.startTransaction();
@@ -310,6 +319,12 @@ export class CommercialWaveService {
     }
 
     const ctx = contexts[0]!;
+    if (buyerUserId === ctx.session.userId) {
+      // Same self-purchase guard as buyAndClaimWave — see comment there.
+      throw new BadRequestException(
+        "You can't buy and claim your own session's waves",
+      );
+    }
     const settings = ctx.settings;
     const lineBreakdowns = allocateBuyClaimLineBreakdowns(
       settings,
@@ -406,6 +421,11 @@ export class CommercialWaveService {
     const ctx = await this.loadCommercialContext(jobId);
     if (ctx.job.videoUnlockedForUserId?.trim()) {
       throw new ConflictException('This wave is already unlocked');
+    }
+    if (sponsorUserId === ctx.session.userId) {
+      // The session's partner cannot sponsor their own wave — debit/credit
+      // would target the same account, see buyAndClaimWave for details.
+      throw new BadRequestException("You can't sponsor your own session's wave");
     }
     const claimStatus = ctx.job.claimStatus ?? 'none';
     let beneficiary: string;

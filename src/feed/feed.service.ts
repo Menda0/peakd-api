@@ -440,12 +440,18 @@ export class FeedService {
     const sponsorPricePeaks = settings
       ? computeCheckoutTotal(computeSponsorPeaks(settings, 1), checkoutOpts).totalPeaks
       : null;
+    // The session owner (partner) can't buy or sponsor their own wave: the
+    // backend rejects it because debit and credit would hit the same account
+    // and effectively make the purchase free (and not change their balance).
+    const viewerIsPartner = session.userId === viewerUserId;
     const canClaim =
-      claimStatus === 'none' && !unlockedFor;
-    const canBuyClaim = Boolean(settings && buyClaimPricePeaks != null);
+      claimStatus === 'none' && !unlockedFor && !viewerIsPartner;
+    const canBuyClaim =
+      Boolean(settings && buyClaimPricePeaks != null) && !viewerIsPartner;
     const canSponsor =
       Boolean(settings) &&
       !unlockedFor &&
+      !viewerIsPartner &&
       (claimStatus !== 'claimed' ||
         (Boolean(claimedBy) && claimedBy !== viewerUserId));
     return {
@@ -1146,7 +1152,14 @@ export class FeedService {
 
   async listDiscoverFeed(
     viewerUserId: string,
-    options: { limit?: string; cursor?: string },
+    options: {
+      limit?: string;
+      cursor?: string;
+      countryCode?: string;
+      regionId?: string;
+      regionIds?: string;
+      spotIds?: string;
+    },
   ): Promise<DiscoverFeedPageDto> {
     const limit = this.parseLimit(options.limit);
     const cursorRaw = options.cursor?.trim();
@@ -1157,6 +1170,38 @@ export class FeedService {
         throw new BadRequestException('Invalid cursor');
       }
     }
+
+    const countryFilter = options.countryCode?.trim().toUpperCase();
+    const regionFilterMulti = options.regionIds
+      ? options.regionIds
+          .split(',')
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0)
+      : [];
+    const regionFilterSingle = options.regionId?.trim();
+    const regionFilter =
+      regionFilterMulti.length > 0
+        ? regionFilterMulti
+        : regionFilterSingle
+          ? [regionFilterSingle]
+          : [];
+    const spotFilter = options.spotIds
+      ? options.spotIds
+          .split(',')
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0)
+      : [];
+    if (countryFilter && !COUNTRY_CODE.test(countryFilter)) {
+      throw new BadRequestException('Invalid countryCode');
+    }
+    if (regionFilter.length > 0 && !countryFilter) {
+      throw new BadRequestException(
+        'countryCode is required when filtering by region',
+      );
+    }
+    const hasGeoFilter = Boolean(
+      countryFilter || regionFilter.length > 0 || spotFilter.length > 0,
+    );
 
     const pipeline: PipelineStage[] = [
       {
@@ -1229,6 +1274,20 @@ export class FeedService {
       },
     ];
 
+    if (hasGeoFilter) {
+      const geoMatch: Record<string, unknown> = {};
+      if (countryFilter) geoMatch['session.countryCode'] = countryFilter;
+      if (regionFilter.length > 0) {
+        geoMatch['session.regionId'] =
+          regionFilter.length === 1 ? regionFilter[0] : { $in: regionFilter };
+      }
+      if (spotFilter.length > 0) {
+        geoMatch['session.spotId'] =
+          spotFilter.length === 1 ? spotFilter[0] : { $in: spotFilter };
+      }
+      pipeline.push({ $match: geoMatch } as PipelineStage);
+    }
+
     if (cursor) {
       pipeline.push({
         $match: buildCursorMatchFilter(cursor),
@@ -1255,7 +1314,7 @@ export class FeedService {
     let items = discoverItems;
     let mergedHasMore = hasMore;
 
-    if (cursor === null) {
+    if (cursor === null && !hasGeoFilter) {
       const pending = await this.listViewerProcessingPersonal(viewerUserId);
       const merged = [...pending, ...discoverItems].sort((a, b) => {
         const t = b.createdAt.localeCompare(a.createdAt);
