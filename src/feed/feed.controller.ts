@@ -32,6 +32,45 @@ export class FeedController {
     return this.feed.listMyVideos(userId);
   }
 
+  @Get('feed/search/geo-suggest')
+  geoSuggest(
+    @Query('q') q?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.feed.geoSuggest(q, limit);
+  }
+
+  @Get('feed/search/session-dates')
+  searchSessionDates(
+    @Query('countryCode') countryCode?: string,
+    @Query('regionId') regionId?: string,
+    @Query('spotId') spotId?: string,
+    @Query('month') month?: string,
+  ) {
+    return this.feed.searchSessionDates({
+      countryCode,
+      regionId,
+      spotId,
+      month,
+    });
+  }
+
+  @Get('feed/search/sessions')
+  searchSessions(
+    @AuthUserId() userId: string,
+    @Query('countryCode') countryCode?: string,
+    @Query('regionId') regionId?: string,
+    @Query('spotId') spotId?: string,
+    @Query('sessionDate') sessionDate?: string,
+  ) {
+    return this.feed.searchSessions(userId, {
+      countryCode,
+      regionId,
+      spotId,
+      sessionDate,
+    });
+  }
+
   @Post('discover/videos/:jobId/publish')
   @HttpCode(HttpStatus.OK)
   publishVideo(
