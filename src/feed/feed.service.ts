@@ -1591,7 +1591,11 @@ export class FeedService {
     const ccRegex = new RegExp(`^${this.escapeRegex(cc)}$`, 'i');
     // Match either the session's stored countryCode or the joined region's
     // countryCode (case-insensitive) so legacy/inconsistent data still surfaces.
+    // Only published sessions (status === 'closed') are returned: open
+    // sessions are still being filled by the partner and should not be
+    // surfaced in search results.
     const match: Record<string, unknown> = {
+      'session.status': 'closed',
       $or: [
         { 'session.countryCode': ccRegex },
         { 'region.countryCode': ccRegex },
