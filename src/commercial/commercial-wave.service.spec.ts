@@ -270,6 +270,28 @@ describe('CommercialWaveService', () => {
     surfSessionModel.findOne.mockReturnValue(leanExec(commercialSession));
   });
 
+  it('rejects buyAndClaimWave when buyer is the session partner', async () => {
+    videoJobModel.findOne.mockReturnValue(leanExec(baseJob));
+
+    await expect(
+      service.buyAndClaimWave(partnerUserId, jobId, 1),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(userProfileModel.findOneAndUpdate).not.toHaveBeenCalled();
+    expect(userProfileModel.updateOne).not.toHaveBeenCalled();
+    expect(videoJobModel.updateOne).not.toHaveBeenCalled();
+    expect(waveUnlockPurchaseModel.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects sponsorWaveUnlock when sponsor is the session partner', async () => {
+    videoJobModel.findOne.mockReturnValue(leanExec(baseJob));
+
+    await expect(
+      service.sponsorWaveUnlock(partnerUserId, jobId),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(userProfileModel.findOneAndUpdate).not.toHaveBeenCalled();
+    expect(userProfileModel.updateOne).not.toHaveBeenCalled();
+  });
+
   it('throws when Peaks balance is insufficient', async () => {
     videoJobModel.findOne.mockReturnValue(leanExec(baseJob));
     userProfileModel.findOneAndUpdate.mockReturnValue(leanExec(null));
