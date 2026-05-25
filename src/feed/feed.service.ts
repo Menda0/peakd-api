@@ -36,7 +36,11 @@ import type { VideoClaimStatus } from '../video/schemas/video-job.schema';
 import {
   buildCursorMatchFilter,
   decodeDiscoverCursor,
+  decodeSearchSessionsCursor,
   encodeDiscoverCursor,
+  encodeSearchSessionsCursor,
+  searchSessionsCursorKey,
+  type SearchSessionsCursor,
   type DiscoverCursor,
 } from './discover-ranking';
 
@@ -95,6 +99,15 @@ export interface SearchSessionDto {
   videoCount: number;
   previewThumbnailUrls: string[];
 }
+
+export interface SearchSessionsPageDto {
+  sessions: SearchSessionDto[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
+const SEARCH_SESSIONS_DEFAULT_LIMIT = 10;
+const SEARCH_SESSIONS_MAX_LIMIT = 50;
 
 export interface DiscoverFeedAuthorDto {
   userId: string;
@@ -1640,6 +1653,34 @@ export class FeedService {
     ];
   }
 
+  private buildSessionGeoMatchNoDate(
+    countryCode: string,
+    regionId?: string,
+    spotId?: string,
+  ): Record<string, unknown> {
+    const cc = countryCode.trim().toUpperCase();
+    const ccRegex = new RegExp(`^${this.escapeRegex(cc)}$`, 'i');
+    const match: Record<string, unknown> = {
+      'session.status': 'closed',
+      $or: [
+        { 'session.countryCode': ccRegex },
+        { 'region.countryCode': ccRegex },
+      ],
+    };
+    if (regionId?.trim()) match['session.regionId'] = regionId.trim();
+    if (spotId?.trim()) match['session.spotId'] = spotId.trim();
+    return match;
+  }
+
+  private parseSearchSessionsLimit(raw: string | undefined): number {
+    if (!raw?.trim()) return SEARCH_SESSIONS_DEFAULT_LIMIT;
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new BadRequestException('Invalid limit');
+    }
+    return Math.min(parsed, SEARCH_SESSIONS_MAX_LIMIT);
+  }
+
   private buildSessionGeoMatch(
     countryCode: string,
     sessionDate: string | { from: string; to: string },
@@ -1650,7 +1691,11 @@ export class FeedService {
     const ccRegex = new RegExp(`^${this.escapeRegex(cc)}$`, 'i');
     // Match either the session's stored countryCode or the joined region's
     // countryCode (case-insensitive) so legacy/inconsistent data still surfaces.
+    // Only published sessions (status === 'closed') are returned: open
+    // sessions are still being filled by the partner and should not be
+    // surfaced in search results.
     const match: Record<string, unknown> = {
+      'session.status': 'closed',
       $or: [
         { 'session.countryCode': ccRegex },
         { 'region.countryCode': ccRegex },
@@ -1813,27 +1858,70 @@ export class FeedService {
       regionId?: string;
       spotId?: string;
       sessionDate?: string;
+      limit?: string;
+      cursor?: string;
     },
-  ): Promise<{ sessions: SearchSessionDto[] }> {
+  ): Promise<SearchSessionsPageDto> {
     if (!options.countryCode?.trim()) {
       throw new BadRequestException('countryCode is required');
     }
-    if (!options.sessionDate?.trim()) {
-      throw new BadRequestException('sessionDate is required');
-    }
     const countryCode = this.normalizeCountryCode(options.countryCode);
-    const sessionDate = this.normalizeSessionDate(options.sessionDate);
+    const sessionDate = options.sessionDate?.trim()
+      ? this.normalizeSessionDate(options.sessionDate)
+      : null;
+    const limit = this.parseSearchSessionsLimit(options.limit);
 
-    const pipeline: PipelineStage[] = [
-      ...this.discoverJobsWithSessionStages(),
-      {
-        $match: this.buildSessionGeoMatch(
+    let cursor: SearchSessionsCursor | null = null;
+    if (options.cursor?.trim()) {
+      cursor = decodeSearchSessionsCursor(options.cursor.trim());
+      if (!cursor) {
+        throw new BadRequestException('Invalid cursor');
+      }
+    }
+
+    const match = sessionDate
+      ? this.buildSessionGeoMatch(
           countryCode,
           sessionDate,
           options.regionId,
           options.spotId,
-        ),
+        )
+      : this.buildSessionGeoMatchNoDate(
+          countryCode,
+          options.regionId,
+          options.spotId,
+        );
+
+    const postGroupStages: PipelineStage[] = [
+      {
+        $addFields: {
+          __sortKey: {
+            $concat: [
+              { $ifNull: ['$session.sessionDate', ''] },
+              'T',
+              {
+                $ifNull: [{ $ifNull: ['$session.sessionTime', null] }, '12:00'],
+              },
+              '#',
+              '$_id',
+            ],
+          },
+        },
       },
+      { $sort: { __sortKey: -1 } },
+    ];
+
+    if (cursor) {
+      postGroupStages.push({
+        $match: { __sortKey: { $lt: searchSessionsCursorKey(cursor) } },
+      });
+    }
+
+    postGroupStages.push({ $limit: limit + 1 });
+
+    const pipeline: PipelineStage[] = [
+      ...this.discoverJobsWithSessionStages(),
+      { $match: match },
       { $sort: { createdAt: -1 } },
       {
         $group: {
@@ -1854,7 +1942,7 @@ export class FeedService {
           videoCount: { $sum: 1 },
         },
       },
-      { $sort: { 'session.sessionTime': 1 } },
+      ...postGroupStages,
     ];
 
     const rows = (await this.videoJobModel.aggregate(pipeline).exec()) as Array<{
@@ -1865,8 +1953,11 @@ export class FeedService {
       videoCount: number;
     }>;
 
+    const hasMore = rows.length > limit;
+    const pageRows = hasMore ? rows.slice(0, limit) : rows;
+
     const sessions: SearchSessionDto[] = [];
-    for (const row of rows) {
+    for (const row of pageRows) {
       const session = row.session;
       const [region, spot, authorProfile, partnerProfile] = await Promise.all([
         this.regionModel.findOne({ regionId: session.regionId }).lean().exec(),
@@ -1978,6 +2069,16 @@ export class FeedService {
       });
     }
 
-    return { sessions };
+    const last = pageRows[pageRows.length - 1];
+    const nextCursor =
+      hasMore && last
+        ? encodeSearchSessionsCursor({
+            sessionDate: last.session.sessionDate,
+            sessionTime: last.session.sessionTime?.trim() || '12:00',
+            sessionId: last._id,
+          })
+        : null;
+
+    return { sessions, nextCursor, hasMore };
   }
 }
