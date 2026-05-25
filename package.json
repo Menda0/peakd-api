@@ -12,7 +12,8 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "init:portugal": "ts-node --project tsconfig.scripts.json scripts/seed-portugal.ts",
-    "backfill:wave-unlock-ledger": "ts-node --project tsconfig.scripts.json scripts/backfill-wave-unlock-ledger.ts"
+    "backfill:wave-unlock-ledger": "ts-node --project tsconfig.scripts.json scripts/backfill-wave-unlock-ledger.ts",
+    "backfill:partner-earnings": "ts-node --project tsconfig.scripts.json scripts/backfill-partner-earnings.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.782.0",

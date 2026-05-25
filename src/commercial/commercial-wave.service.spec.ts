@@ -140,7 +140,7 @@ describe('CommercialWaveService', () => {
     );
     expect(userProfileModel.updateOne).toHaveBeenCalledWith(
       { userId: partnerUserId },
-      expect.objectContaining({ $inc: { peaksBalance: 50 } }),
+      expect.objectContaining({ $inc: { partnerEarningsPeaks: 50 } }),
       expect.objectContaining({ session: mongoSession, upsert: true }),
     );
     expect(waveUnlockPurchaseModel.create).toHaveBeenCalledWith(
