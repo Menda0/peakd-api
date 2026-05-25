@@ -2,6 +2,10 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
+import {
+  BILLING_CONFIG_KEY,
+  type BillingConfigValues,
+} from '../config/billing.config';
 import { S3Service } from '../s3/s3.service';
 import { WaveUnlockPurchase } from '../commercial/schemas/wave-unlock-purchase.schema';
 import { Region } from '../studio/schemas/region.schema';
@@ -35,6 +39,8 @@ export type AdminPeaksSummaryDto = {
    * country when no region is selected (null when no country filter).
    */
   regionsCommunityFeePeaks: number | null;
+  /** Conversion rate used by billing (Peaks per 1 EUR). */
+  peaksPerEuro: number;
 };
 
 export type AdminPeaksTransactionDto = {
@@ -193,6 +199,10 @@ export class AdminPeaksService {
       }
     }
 
+    const billing = this.config.get<BillingConfigValues>(BILLING_CONFIG_KEY);
+    const peaksPerEuro =
+      billing?.peaksPerEuro && billing.peaksPerEuro > 0 ? billing.peaksPerEuro : 100;
+
     return {
       circulatingPeaks: Math.max(0, Math.round(balanceAgg[0]?.total ?? 0)),
       unlockTransactionCount: unlock?.count ?? 0,
@@ -201,6 +211,7 @@ export class AdminPeaksService {
       totalCommunityFeePeaks: unlock?.totalCommunityFeePeaks ?? 0,
       countryCommunityFeePeaks,
       regionsCommunityFeePeaks,
+      peaksPerEuro,
     };
   }
 
