@@ -1506,6 +1506,20 @@ export class FeedService {
         },
       },
       { $unwind: { path: '$session', preserveNullAndEmptyArrays: false } },
+      // Join the session's region so country filters can fall back on the
+      // canonical region.countryCode if the denormalized session.countryCode
+      // is missing or has inconsistent casing in legacy data.
+      {
+        $lookup: {
+          from: 'regions',
+          localField: 'session.regionId',
+          foreignField: 'regionId',
+          as: 'region',
+        },
+      },
+      {
+        $unwind: { path: '$region', preserveNullAndEmptyArrays: true },
+      },
     ];
   }
 
@@ -1515,8 +1529,15 @@ export class FeedService {
     regionId?: string,
     spotId?: string,
   ): Record<string, unknown> {
+    const cc = countryCode.trim().toUpperCase();
+    const ccRegex = new RegExp(`^${this.escapeRegex(cc)}$`, 'i');
+    // Match either the session's stored countryCode or the joined region's
+    // countryCode (case-insensitive) so legacy/inconsistent data still surfaces.
     const match: Record<string, unknown> = {
-      'session.countryCode': countryCode,
+      $or: [
+        { 'session.countryCode': ccRegex },
+        { 'region.countryCode': ccRegex },
+      ],
     };
     if (typeof sessionDate === 'string') {
       match['session.sessionDate'] = sessionDate;
