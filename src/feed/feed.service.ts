@@ -60,6 +60,20 @@ export interface GeoSuggestItemDto {
   verified: boolean;
 }
 
+export interface SearchSessionAuthorDto {
+  userId: string;
+  displayName: string | null;
+  avatarUrl: string | null;
+  isPartner: boolean;
+  partnerType: 'videographer' | 'coach' | 'other' | null;
+}
+
+export interface SearchSessionSurferDto {
+  userId: string;
+  displayName: string | null;
+  avatarUrl: string | null;
+}
+
 export interface SearchSessionDto {
   sessionId: string;
   countryCode: string;
@@ -72,7 +86,8 @@ export interface SearchSessionDto {
   waveTypes: string[];
   regionName: string;
   spotName: string | null;
-  author: DiscoverFeedAuthorDto;
+  author: SearchSessionAuthorDto;
+  surfers: SearchSessionSurferDto[];
   videoCount: number;
   previewThumbnailUrls: string[];
 }
@@ -1687,6 +1702,15 @@ export class FeedService {
           snapshotKeys: {
             $push: { $arrayElemAt: ['$snapshotKeys', 0] },
           },
+          claimedSurferIds: {
+            $addToSet: {
+              $cond: [
+                { $eq: ['$claimStatus', 'claimed'] },
+                '$claimedByUserId',
+                null,
+              ],
+            },
+          },
           videoCount: { $sum: 1 },
         },
       },
@@ -1697,6 +1721,7 @@ export class FeedService {
       _id: string;
       session: SurfSession;
       snapshotKeys: (string | null | undefined)[];
+      claimedSurferIds: (string | null | undefined)[];
       videoCount: number;
     }>;
 
@@ -1731,7 +1756,7 @@ export class FeedService {
         }
       }
 
-      const author = await this.buildDiscoverAuthor(
+      const baseAuthor = await this.buildDiscoverAuthor(
         session.userId,
         'studio',
         authorProfile ?? null,
@@ -1740,6 +1765,48 @@ export class FeedService {
           avatarKey?: string | null;
         } | null) ?? null,
       );
+      const partnerTypeRaw = (partnerProfile as {
+        partnerType?: string | null;
+      } | null)?.partnerType;
+      const partnerType: SearchSessionAuthorDto['partnerType'] =
+        partnerTypeRaw === 'videographer' ||
+        partnerTypeRaw === 'coach' ||
+        partnerTypeRaw === 'other'
+          ? partnerTypeRaw
+          : null;
+      const author: SearchSessionAuthorDto = {
+        ...baseAuthor,
+        partnerType: baseAuthor.isPartner ? partnerType ?? 'other' : null,
+      };
+
+      const surferIds = Array.from(
+        new Set(
+          row.claimedSurferIds.filter(
+            (id): id is string => typeof id === 'string' && id.trim().length > 0,
+          ),
+        ),
+      );
+      const surferProfiles = surferIds.length
+        ? await this.userProfileModel
+            .find({ userId: { $in: surferIds } })
+            .lean()
+            .exec()
+        : [];
+      const surferProfileMap = new Map(
+        surferProfiles.map((p) => [p.userId, p]),
+      );
+      const surfers: SearchSessionSurferDto[] = [];
+      for (const surferId of surferIds) {
+        const profile = surferProfileMap.get(surferId);
+        const avatarUrl = await this.resolveAvatarUrl(
+          profile?.avatarKey ?? null,
+        );
+        surfers.push({
+          userId: surferId,
+          displayName: profile?.displayName?.trim() || null,
+          avatarUrl,
+        });
+      }
 
       sessions.push({
         sessionId: session.sessionId,
@@ -1758,6 +1825,7 @@ export class FeedService {
         regionName,
         spotName,
         author,
+        surfers,
         videoCount: row.videoCount,
         previewThumbnailUrls,
       });
