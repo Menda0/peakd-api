@@ -58,6 +58,48 @@ export function decodeDiscoverCursor(raw: string): DiscoverCursor | null {
   return null;
 }
 
+export type SearchSessionsCursor = {
+  sessionDate: string;
+  sessionTime: string;
+  sessionId: string;
+};
+
+export function searchSessionsCursorKey(cursor: SearchSessionsCursor): string {
+  return `${cursor.sessionDate}T${cursor.sessionTime}#${cursor.sessionId}`;
+}
+
+export function encodeSearchSessionsCursor(
+  cursor: SearchSessionsCursor,
+): string {
+  return Buffer.from(JSON.stringify(cursor)).toString('base64url');
+}
+
+export function decodeSearchSessionsCursor(
+  raw: string,
+): SearchSessionsCursor | null {
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(raw, 'base64url').toString('utf8'),
+    ) as Record<string, unknown>;
+    if (
+      typeof parsed.sessionDate === 'string' &&
+      typeof parsed.sessionTime === 'string' &&
+      typeof parsed.sessionId === 'string' &&
+      parsed.sessionDate.trim() &&
+      parsed.sessionId.trim()
+    ) {
+      return {
+        sessionDate: parsed.sessionDate,
+        sessionTime: parsed.sessionTime.trim() || '12:00',
+        sessionId: parsed.sessionId,
+      };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 export function buildCursorMatchFilter(
   cursor: DiscoverCursor,
 ): Record<string, unknown> {

@@ -435,6 +435,28 @@ export class StudioService {
     return 'idle';
   }
 
+  /** Region by id+country for display (e.g. resolving a user's stored homeRegionId name). */
+  async findRegionForCountry(
+    regionIdRaw: string,
+    countryCodeRaw: string,
+  ): Promise<RegionListItemDto | null> {
+    const countryCode = normalizeCountryCode(countryCodeRaw);
+    if (!COUNTRY_CODE.test(countryCode)) return null;
+    const regionId = typeof regionIdRaw === 'string' ? regionIdRaw.trim() : '';
+    if (!regionId) return null;
+    const region = await this.regionModel
+      .findOne({ regionId, countryCode })
+      .lean()
+      .exec();
+    if (!region || region.disabled === true) return null;
+    return {
+      regionId: region.regionId,
+      countryCode: region.countryCode,
+      name: region.name,
+      verified: Boolean(region.verified),
+    };
+  }
+
   /**
    * Verified region for a country, visible to the user (verified regions are public;
    * unverified regions only visible to creator — must still be verified here).
