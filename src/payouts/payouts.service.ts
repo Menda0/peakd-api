@@ -16,11 +16,16 @@ import {
 } from '../config/billing.config';
 import { WaveUnlockPurchase } from '../commercial/schemas/wave-unlock-purchase.schema';
 import { PartnerProfile } from '../partner/schemas/partner-profile.schema';
+import { S3Service } from '../s3/s3.service';
 import { UserProfile } from '../users/schemas/user-profile.schema';
+import { VideoJob } from '../video/schemas/video-job.schema';
 import {
   PartnerWithdrawal,
   type PartnerWithdrawalStatus,
 } from './schemas/partner-withdrawal.schema';
+
+/** Cap on snapshot previews per earnings row (matches the UI ask). */
+const EARNINGS_PREVIEW_MAX = 3;
 
 const COUNTRY_CODE = /^[A-Z]{2}$/;
 
@@ -45,6 +50,12 @@ export interface PartnerWithdrawalDto {
   createdAt: string;
 }
 
+export interface PartnerEarningBuyerDto {
+  userId: string;
+  displayName: string | null;
+  avatarUrl: string | null;
+}
+
 export interface PartnerEarningRowDto {
   id: string;
   jobId: string;
@@ -53,6 +64,9 @@ export interface PartnerEarningRowDto {
   regionId: string;
   type: string;
   createdAt: string;
+  buyer: PartnerEarningBuyerDto;
+  /** Up to `EARNINGS_PREVIEW_MAX` snapshot URLs for the unlocked video. */
+  previewThumbnailUrls: string[];
 }
 
 export interface PartnerEarningsPageDto {
@@ -76,6 +90,9 @@ export class PayoutsService {
     private readonly partnerWithdrawalModel: Model<PartnerWithdrawal>,
     @InjectModel(WaveUnlockPurchase.name)
     private readonly waveUnlockPurchaseModel: Model<WaveUnlockPurchase>,
+    @InjectModel(VideoJob.name)
+    private readonly videoJobModel: Model<VideoJob>,
+    private readonly s3: S3Service,
   ) {}
 
   private billing(): BillingConfigValues {
@@ -249,6 +266,28 @@ export class PayoutsService {
       .exec();
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
+
+    // Batch the buyer + video lookups so we don't N+1 the database while
+    // rendering the earnings list.
+    const buyerIds = [
+      ...new Set(
+        page
+          .map((r) => r.buyerUserId?.trim())
+          .filter((s): s is string => Boolean(s)),
+      ),
+    ];
+    const jobIds = [
+      ...new Set(
+        page
+          .map((r) => r.jobId?.trim())
+          .filter((s): s is string => Boolean(s)),
+      ),
+    ];
+    const [buyersByUserId, thumbsByJobId] = await Promise.all([
+      this.buyersByUserId(buyerIds),
+      this.previewThumbnailsByJobId(jobIds),
+    ]);
+
     const items: PartnerEarningRowDto[] = page.map((row) => {
       // New rows persist `partnerEarningsCents` at unlock time; legacy rows
       // pre-dating the pivot don't, so fall back to the live conversion.
@@ -259,6 +298,11 @@ export class PayoutsService {
       const amountCents =
         persistedCents ??
         Math.floor(((row.basePeaks ?? 0) * 100) / b.peaksPerEuro);
+      const buyer = buyersByUserId.get(row.buyerUserId) ?? {
+        userId: row.buyerUserId,
+        displayName: null,
+        avatarUrl: null,
+      };
       return {
         id: String(row._id),
         jobId: row.jobId,
@@ -267,12 +311,98 @@ export class PayoutsService {
         regionId: row.regionId ?? '',
         type: row.type,
         createdAt: row.createdAt,
+        buyer,
+        previewThumbnailUrls: thumbsByJobId.get(row.jobId) ?? [],
       };
     });
     const nextCursor = hasMore
       ? (page[page.length - 1]!.createdAt ?? null)
       : null;
     return { items, nextCursor };
+  }
+
+  /** Avatar URL resolution mirrors `AdminPeaksService.resolveAvatarUrl`. */
+  private async resolveAvatarUrl(
+    avatarKey: string | null,
+  ): Promise<string | null> {
+    if (!avatarKey?.trim()) return null;
+    const publicBase = this.config.get<string>('S3_PUBLIC_BASE_URL')?.trim();
+    if (publicBase) {
+      return `${publicBase.replace(/\/+$/, '')}/${avatarKey.trim()}`;
+    }
+    const expiry = Number(
+      this.config.get<string>('USER_AVATAR_GET_URL_EXPIRY_SECONDS') ?? '604800',
+    );
+    return this.s3.presignedGetUrl(avatarKey.trim(), expiry);
+  }
+
+  private async buyersByUserId(
+    userIds: string[],
+  ): Promise<Map<string, PartnerEarningBuyerDto>> {
+    const out = new Map<string, PartnerEarningBuyerDto>();
+    if (userIds.length === 0) return out;
+
+    const profiles = await this.userProfileModel
+      .find({ userId: { $in: userIds } })
+      .select({ userId: 1, displayName: 1, nickname: 1, avatarKey: 1 })
+      .lean()
+      .exec();
+
+    // Presign once per unique avatar key so multiple buyers sharing one
+    // avatar (rare but possible) don't trigger duplicate signing work.
+    const avatarUrlByKey = new Map<string, string | null>();
+    for (const profile of profiles) {
+      const key = profile.avatarKey?.trim();
+      if (key && !avatarUrlByKey.has(key)) {
+        avatarUrlByKey.set(key, await this.resolveAvatarUrl(key));
+      }
+      const displayName =
+        profile.displayName?.trim() || profile.nickname?.trim() || null;
+      out.set(profile.userId, {
+        userId: profile.userId,
+        displayName,
+        avatarUrl: key ? (avatarUrlByKey.get(key) ?? null) : null,
+      });
+    }
+    for (const userId of userIds) {
+      if (!out.has(userId)) {
+        out.set(userId, { userId, displayName: null, avatarUrl: null });
+      }
+    }
+    return out;
+  }
+
+  private async previewThumbnailsByJobId(
+    jobIds: string[],
+  ): Promise<Map<string, string[]>> {
+    const out = new Map<string, string[]>();
+    if (jobIds.length === 0) return out;
+    const jobs = await this.videoJobModel
+      .find({ jobId: { $in: jobIds } })
+      .select({ jobId: 1, snapshotKeys: 1 })
+      .lean()
+      .exec();
+    // Presign every unique snapshot key once and dedupe across rows.
+    const urlByKey = new Map<string, string>();
+    for (const job of jobs) {
+      const keys = (job.snapshotKeys ?? []).slice(0, EARNINGS_PREVIEW_MAX);
+      const urls: string[] = [];
+      for (const key of keys) {
+        const trimmed = key?.trim();
+        if (!trimmed) continue;
+        let url = urlByKey.get(trimmed);
+        if (!url) {
+          url = await this.s3.presignedGetUrl(trimmed);
+          urlByKey.set(trimmed, url);
+        }
+        urls.push(url);
+      }
+      out.set(job.jobId, urls);
+    }
+    for (const id of jobIds) {
+      if (!out.has(id)) out.set(id, []);
+    }
+    return out;
   }
 
   /**
