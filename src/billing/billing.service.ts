@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Injectable,
   InternalServerErrorException,
+  Logger,
   OnModuleInit,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -15,7 +16,7 @@ import {
 } from '../config/billing.config';
 import { UserProfile } from '../users/schemas/user-profile.schema';
 import {
-  assertPacksMeetMinimum,
+  assertPacksAreSolvent,
   computeCheckoutPricing,
   getPeakPackById,
   PEAK_PACKS,
@@ -49,6 +50,7 @@ function isMongoDuplicateKey(err: unknown): boolean {
 
 @Injectable()
 export class BillingService implements OnModuleInit {
+  private readonly logger = new Logger(BillingService.name);
   private stripeClient: Stripe | null = null;
 
   constructor(
@@ -63,7 +65,12 @@ export class BillingService implements OnModuleInit {
   onModuleInit(): void {
     const billing = this.config.get<BillingConfigValues>(BILLING_CONFIG_KEY);
     if (!billing) return;
-    assertPacksMeetMinimum(billing.peaksPerEuro);
+    assertPacksAreSolvent({
+      peaksPerEuro: billing.peaksPerEuro,
+      platformFeePercent: billing.platformFeePercent,
+      expectedStripeFeePercent: billing.expectedStripeFeePercent,
+      expectedStripeFixedCents: billing.expectedStripeFixedCents,
+    });
   }
 
   private billing(): BillingConfigValues {
@@ -306,6 +313,12 @@ export class BillingService implements OnModuleInit {
           ? (session.payment_intent as Stripe.PaymentIntent).id
           : null;
 
+    // Retrieve the BalanceTransaction so we can persist Stripe's real processing
+    // fee + net settlement amount alongside the gross we already store. Without
+    // this we can never reconcile our `peak_purchases` ledger against the actual
+    // money landing in our Stripe balance.
+    const feeInfo = await this.resolveStripeFeeInfo(paymentIntentId, currency);
+
     const mongoSession = await this.connection.startSession();
     mongoSession.startTransaction();
     try {
@@ -321,6 +334,10 @@ export class BillingService implements OnModuleInit {
             totalAmountCents: pricing.totalAmountCents,
             stripeCheckoutSessionId: sessionId,
             stripePaymentIntentId: paymentIntentId,
+            stripeBalanceTransactionId: feeInfo.balanceTransactionId,
+            stripeFeeCents: feeInfo.feeCents,
+            stripeNetCents: feeInfo.netCents,
+            stripeCurrency: feeInfo.currency,
             status: 'completed',
           },
         ],
@@ -353,6 +370,63 @@ export class BillingService implements OnModuleInit {
       throw err;
     } finally {
       await mongoSession.endSession();
+    }
+  }
+
+  /**
+   * Pulls the Stripe processing fee + net settled amount for a Checkout charge
+   * by retrieving the PaymentIntent with its latest charge's BalanceTransaction
+   * expanded. Returns nulls if Stripe doesn't have the data yet — the webhook
+   * may retry, and we still want the purchase row written.
+   */
+  private async resolveStripeFeeInfo(
+    paymentIntentId: string | null,
+    expectedCurrency: string,
+  ): Promise<{
+    balanceTransactionId: string | null;
+    feeCents: number | null;
+    netCents: number | null;
+    currency: string | null;
+  }> {
+    if (!paymentIntentId) {
+      return { balanceTransactionId: null, feeCents: null, netCents: null, currency: null };
+    }
+    try {
+      const pi = await this.stripe().paymentIntents.retrieve(paymentIntentId, {
+        expand: ['latest_charge.balance_transaction'],
+      });
+      const charge = pi.latest_charge;
+      if (!charge || typeof charge === 'string') {
+        return { balanceTransactionId: null, feeCents: null, netCents: null, currency: null };
+      }
+      const bt = (charge as Stripe.Charge).balance_transaction;
+      if (!bt || typeof bt === 'string') {
+        return { balanceTransactionId: null, feeCents: null, netCents: null, currency: null };
+      }
+      const txn = bt as Stripe.BalanceTransaction;
+      const currency = (txn.currency ?? '').toLowerCase();
+      if (currency && currency !== expectedCurrency) {
+        // Loud warning rather than throwing — we'd rather still record the
+        // purchase than drop revenue because Stripe routed the charge through
+        // a different settlement currency. The admin dashboard surfaces FX
+        // anomalies via the per-row `stripeCurrency` field.
+        this.logger.warn(
+          `Stripe BalanceTransaction currency (${currency}) differs from Checkout currency (${expectedCurrency}) for PI ${paymentIntentId}`,
+        );
+      }
+      return {
+        balanceTransactionId: txn.id,
+        feeCents: typeof txn.fee === 'number' ? txn.fee : null,
+        netCents: typeof txn.net === 'number' ? txn.net : null,
+        currency: currency || null,
+      };
+    } catch (err) {
+      this.logger.warn(
+        `Failed to retrieve Stripe BalanceTransaction for PI ${paymentIntentId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return { balanceTransactionId: null, feeCents: null, netCents: null, currency: null };
     }
   }
 }

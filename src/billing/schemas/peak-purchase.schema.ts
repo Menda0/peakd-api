@@ -33,6 +33,26 @@ export class PeakPurchase {
   @Prop({ type: String, default: null })
   stripePaymentIntentId: string | null;
 
+  /**
+   * The id of the Stripe BalanceTransaction associated with the original charge.
+   * Used as a reconciliation key against Stripe's own ledger and to detect duplicate
+   * fee writes during webhook retries.
+   */
+  @Prop({ type: String, default: null, index: true })
+  stripeBalanceTransactionId: string | null;
+
+  /** Stripe processing fee in EUR cents (from BalanceTransaction.fee). */
+  @Prop({ type: Number, default: null })
+  stripeFeeCents: number | null;
+
+  /** Net amount landed in the platform balance in EUR cents (BalanceTransaction.net). */
+  @Prop({ type: Number, default: null })
+  stripeNetCents: number | null;
+
+  /** Currency of the original charge, lower-case (e.g. "eur"). */
+  @Prop({ type: String, default: null })
+  stripeCurrency: string | null;
+
   @Prop({ required: true, default: 'completed' })
   status: string;
 }
