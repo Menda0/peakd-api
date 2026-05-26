@@ -94,6 +94,14 @@ export class FeedController {
     return this.feed.listLatestSessions(userId, limit);
   }
 
+  @Get('feed/latest-waves')
+  latestWaves(
+    @AuthUserId() userId: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.feed.listLatestWaves(userId, limit);
+  }
+
   @Post('discover/videos/:jobId/publish')
   @HttpCode(HttpStatus.OK)
   publishVideo(

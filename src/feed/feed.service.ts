@@ -110,6 +110,29 @@ const SEARCH_SESSIONS_DEFAULT_LIMIT = 10;
 const SEARCH_SESSIONS_MAX_LIMIT = 50;
 const LATEST_SESSIONS_DEFAULT_LIMIT = 5;
 const LATEST_SESSIONS_MAX_LIMIT = 20;
+const LATEST_WAVES_DEFAULT_LIMIT = 4;
+const LATEST_WAVES_MAX_LIMIT = 20;
+
+export interface LatestWaveLocationDto {
+  countryCode: string;
+  regionName: string;
+  spotName: string | null;
+  isUndisclosed: boolean;
+}
+
+export interface LatestWaveDto {
+  jobId: string;
+  sessionId: string;
+  shareToken: string | null;
+  claimStatus: 'auto' | 'claimed';
+  claimedAt: string;
+  thumbnailUrl: string | null;
+  isCommercial: boolean;
+  surfer: SurferProfileDto | null;
+  location: LatestWaveLocationDto;
+  sessionDate: string;
+  sessionTime: string;
+}
 
 export interface DiscoverFeedAuthorDto {
   userId: string;
@@ -2025,6 +2048,127 @@ export class FeedService {
     }
 
     return { sessions };
+  }
+
+  async listLatestWaves(
+    _viewerUserId: string,
+    rawLimit?: string,
+  ): Promise<{ waves: LatestWaveDto[] }> {
+    const limit = this.parseLatestWavesLimit(rawLimit);
+
+    const pipeline: PipelineStage[] = [
+      {
+        $match: {
+          status: 'completed',
+          processedKey: { $exists: true, $ne: null },
+          surfSessionId: { $ne: null },
+          discoverPublishedAt: { $type: 'string' },
+          claimStatus: { $in: ['auto', 'claimed'] },
+          claimedAt: { $type: 'string' },
+        },
+      },
+      { $sort: { claimedAt: -1, _id: -1 } },
+      { $limit: limit },
+      {
+        $lookup: {
+          from: 'surf_sessions',
+          localField: 'surfSessionId',
+          foreignField: 'sessionId',
+          as: 'session',
+        },
+      },
+      { $unwind: { path: '$session', preserveNullAndEmptyArrays: false } },
+    ];
+
+    const rows = (await this.videoJobModel.aggregate(pipeline).exec()) as Array<{
+      jobId: string;
+      claimedAt: string;
+      claimStatus: 'auto' | 'claimed';
+      claimedByUserId?: string | null;
+      userId: string;
+      snapshotKeys?: string[];
+      session: SurfSession;
+    }>;
+
+    const waves: LatestWaveDto[] = [];
+    for (const row of rows) {
+      waves.push(await this.enrichLatestWaveRow(row));
+    }
+
+    return { waves };
+  }
+
+  private parseLatestWavesLimit(raw: string | undefined): number {
+    if (!raw?.trim()) return LATEST_WAVES_DEFAULT_LIMIT;
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new BadRequestException('Invalid limit');
+    }
+    return Math.min(parsed, LATEST_WAVES_MAX_LIMIT);
+  }
+
+  private async enrichLatestWaveRow(row: {
+    jobId: string;
+    claimedAt: string;
+    claimStatus: 'auto' | 'claimed';
+    claimedByUserId?: string | null;
+    userId: string;
+    snapshotKeys?: string[];
+    session: SurfSession;
+  }): Promise<LatestWaveDto> {
+    const session = row.session;
+    const [region, spot] = await Promise.all([
+      this.regionModel.findOne({ regionId: session.regionId }).lean().exec(),
+      this.spotModel.findOne({ spotId: session.spotId }).lean().exec(),
+    ]);
+
+    const isUndisclosed =
+      isUndisclosedRegionId(session.regionId, session.countryCode) ||
+      isUndisclosedSpotId(session.spotId, session.countryCode);
+
+    const regionName =
+      region?.name?.trim() ||
+      (isUndisclosedRegionId(session.regionId, session.countryCode)
+        ? 'Undisclosed'
+        : 'Unknown');
+    const spotName = isUndisclosed ? null : spot?.name?.trim() || null;
+
+    const snapKey = row.snapshotKeys?.find(
+      (k): k is string => typeof k === 'string' && k.trim().length > 0,
+    );
+    const thumbnailUrl = snapKey
+      ? await this.s3.presignedGetUrl(snapKey)
+      : null;
+
+    const surfer = await this.resolveFeedSurfer({
+      userId: row.userId,
+      claimStatus: row.claimStatus,
+      claimedByUserId: row.claimedByUserId ?? null,
+    });
+
+    const shareToken =
+      typeof session.shareToken === 'string' && session.shareToken.trim()
+        ? session.shareToken.trim()
+        : null;
+
+    return {
+      jobId: row.jobId,
+      sessionId: session.sessionId,
+      shareToken,
+      claimStatus: row.claimStatus,
+      claimedAt: row.claimedAt,
+      thumbnailUrl,
+      isCommercial: session.isCommercial === true,
+      surfer,
+      location: {
+        countryCode: session.countryCode,
+        regionName,
+        spotName,
+        isUndisclosed,
+      },
+      sessionDate: session.sessionDate,
+      sessionTime: session.sessionTime?.trim() || '12:00',
+    };
   }
 
   private parseLatestSessionsLimit(raw: string | undefined): number {
