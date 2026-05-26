@@ -313,4 +313,17 @@ describe('CommercialWaveService', () => {
     );
     expect(mongoSession.abortTransaction).toHaveBeenCalled();
   });
+
+  // Phase C: ledger rows must dual-write `platformRetentionPeaks` alongside
+  // the legacy `communityFeePeaks` so admin aggregates can move to the new
+  // canonical field without losing historical data.
+  it('writes platformRetentionPeaks alongside communityFeePeaks on each unlock', async () => {
+    videoJobModel.findOne.mockReturnValue(leanExec(baseJob));
+    await service.buyAndClaimWave(buyerUserId, jobId, 1);
+
+    const created = waveUnlockPurchaseModel.create.mock.calls[0][0][0];
+    expect(created.communityFeePeaks).toBe(10);
+    expect(created.platformRetentionPeaks).toBe(10);
+    expect(created.platformRetentionPeaks).toBe(created.communityFeePeaks);
+  });
 });

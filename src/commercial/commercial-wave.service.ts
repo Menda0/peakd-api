@@ -166,6 +166,9 @@ export class CommercialWaveService {
   ) {
     return {
       ...fields,
+      // Dual-write the canonical field name alongside the legacy one so
+      // new aggregations + admin views read the same value either way.
+      platformRetentionPeaks: fields.communityFeePeaks,
       sessionId: ctx.session.sessionId,
       partnerUserId: ctx.session.userId,
       countryCode: ctx.session.countryCode,

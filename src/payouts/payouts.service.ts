@@ -4,6 +4,7 @@ import {
   Injectable,
   InternalServerErrorException,
   Logger,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
@@ -499,6 +500,14 @@ export class PayoutsService {
       );
     }
 
+    // Pre-flight: confirm the platform's EUR available balance can fund this
+    // transfer *before* we debit the in-DB ledger. Stripe's own
+    // "insufficient available funds" exception is hard to interpret for end
+    // users (it conflates test-mode pending balances, settlement delays, and
+    // currency-bucket mismatches), so we translate it into a 503 with a clear
+    // message and skip the wasted DB write + rollback dance.
+    await this.assertStripeBalanceCovers(amountCents);
+
     const idempotencyKey = `wd_${userId}_${randomUUID()}`;
     const stripeAccountId = partner.stripeConnectAccountId;
 
@@ -599,6 +608,47 @@ export class PayoutsService {
     });
   }
 
+  /**
+   * Queries Stripe's platform-side `Balance` and rejects the withdrawal early
+   * if the EUR available bucket can't cover `amountCents`. Surfaces a 503 so
+   * the FE can treat it as a transient "try again later" state distinct from
+   * the user's own balance being too low (which is a 400).
+   *
+   * Network errors fall through as warnings — we'd rather let the real
+   * `transfers.create` call surface them than block legitimate withdrawals on
+   * an admin-side outage.
+   */
+  private async assertStripeBalanceCovers(amountCents: number): Promise<void> {
+    let balance: Stripe.Balance;
+    try {
+      balance = await this.stripe().balance.retrieve();
+    } catch (err) {
+      this.logger.warn(
+        `Failed to retrieve Stripe balance for pre-flight check: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return;
+    }
+    const availableEur = (balance.available ?? []).find(
+      (b) => (b.currency ?? '').toLowerCase() === 'eur',
+    );
+    const availableCents = availableEur?.amount ?? 0;
+    if (availableCents >= amountCents) return;
+    const pendingEur = (balance.pending ?? []).find(
+      (b) => (b.currency ?? '').toLowerCase() === 'eur',
+    );
+    const pendingCents = pendingEur?.amount ?? 0;
+    this.logger.warn(
+      `Stripe EUR balance below withdrawal: need=${amountCents} available=${availableCents} pending=${pendingCents}`,
+    );
+    throw new ServiceUnavailableException(
+      pendingCents > 0
+        ? 'Funds are still settling with Stripe. Please try again in a few days.'
+        : 'The platform is temporarily unable to process withdrawals. Please try again later.',
+    );
+  }
+
   /** Reverts a debit + marks the withdrawal failed (transactional). */
   private async refundFailedWithdrawal(
     userId: string,
@@ -660,26 +710,87 @@ export class PayoutsService {
     return { matched: res.matchedCount > 0 };
   }
 
-  /** Webhook hook: reconcile a withdrawal record from a transfer event. */
+  /**
+   * Webhook hook: reconcile a withdrawal record from a transfer event.
+   * On `transfer.reversed`, atomically refund `partnerEarningsCents` to the
+   * partner — *only* on the first transition out of a non-failed status, so
+   * webhook retries (or a sync `refundFailedWithdrawal` that already credited
+   * the partner) can't double-refund.
+   */
   async syncWithdrawalFromTransfer(
     transfer: Stripe.Transfer,
     eventType: string,
   ): Promise<{ matched: boolean }> {
-    const status: PartnerWithdrawalStatus =
-      eventType === 'transfer.reversed' ? 'failed' : 'completed';
-    const failureReason =
-      eventType === 'transfer.reversed' ? 'Stripe reversed the transfer' : null;
+    if (eventType === 'transfer.reversed') {
+      return this.applyTransferReversal(transfer);
+    }
     const res = await this.partnerWithdrawalModel
       .updateOne(
         { stripeTransferId: transfer.id },
-        {
-          $set: {
-            status,
-            ...(failureReason ? { failureReason } : {}),
-          },
-        },
+        { $set: { status: 'completed' as PartnerWithdrawalStatus } },
       )
       .exec();
     return { matched: res.matchedCount > 0 };
+  }
+
+  /**
+   * Atomically refunds a reversed transfer:
+   *   1. Find the withdrawal in a non-failed state and flip it to `failed`.
+   *      This `findOneAndUpdate` is the idempotency anchor — only the first
+   *      caller that observes `status !== 'failed'` proceeds to step 2.
+   *   2. Re-credit `partnerEarningsCents` on the partner's profile.
+   *
+   * Both writes run in a Mongo transaction so a refund cannot land without a
+   * status flip (or vice versa) under partial failure.
+   */
+  private async applyTransferReversal(
+    transfer: Stripe.Transfer,
+  ): Promise<{ matched: boolean }> {
+    const mongoSession = await this.connection.startSession();
+    mongoSession.startTransaction();
+    try {
+      const flipped = await this.partnerWithdrawalModel
+        .findOneAndUpdate(
+          { stripeTransferId: transfer.id, status: { $ne: 'failed' } },
+          {
+            $set: {
+              status: 'failed' as PartnerWithdrawalStatus,
+              failureReason: 'Stripe reversed the transfer',
+            },
+          },
+          { session: mongoSession, returnDocument: 'after' },
+        )
+        .lean()
+        .exec();
+      if (!flipped) {
+        // Either no record (untracked transfer) or already failed (replay).
+        // Roll back the empty transaction and tell Stripe we matched nothing
+        // for the untracked case; either way, no refund is owed.
+        await mongoSession.abortTransaction();
+        const exists = await this.partnerWithdrawalModel
+          .exists({ stripeTransferId: transfer.id })
+          .exec();
+        return { matched: Boolean(exists) };
+      }
+      await this.userProfileModel
+        .updateOne(
+          { userId: flipped.userId },
+          { $inc: { partnerEarningsCents: flipped.amountCents } },
+          { session: mongoSession },
+        )
+        .exec();
+      await mongoSession.commitTransaction();
+      return { matched: true };
+    } catch (err) {
+      await mongoSession.abortTransaction();
+      this.logger.error(
+        `Failed to apply transfer.reversed for ${transfer.id}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      throw err;
+    } finally {
+      void mongoSession.endSession();
+    }
   }
 }

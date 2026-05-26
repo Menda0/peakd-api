@@ -16,6 +16,17 @@ export interface BillingConfigValues {
   partnerMinWithdrawalCents: number;
   /** Path appended to APP_BASE_URL for Connect onboarding return/refresh URLs. */
   partnerPayoutReturnPath: string;
+  /**
+   * Expected Stripe processing fee as a percent of the gross charge.
+   * Used at boot to assert PLATFORM_FEE_PERCENT and pack pricing stay
+   * cash-positive. Default 1.5 reflects standard EEA card pricing.
+   */
+  expectedStripeFeePercent: number;
+  /**
+   * Expected Stripe fixed processing fee, in cents per charge. Used in the
+   * same boot-time solvency assertion. Default 25 reflects EEA card pricing.
+   */
+  expectedStripeFixedCents: number;
 }
 
 function parsePositiveInt(raw: string | undefined, fallback: number): number {
@@ -30,6 +41,26 @@ function parseFeePercent(raw: string | undefined): number {
   const n = Number.parseFloat(raw);
   if (!Number.isFinite(n) || n < 0) return 0;
   return Math.min(n, 100);
+}
+
+function parseNonNegativeFloat(
+  raw: string | undefined,
+  fallback: number,
+): number {
+  if (raw == null || raw.trim() === '') return fallback;
+  const n = Number.parseFloat(raw);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return n;
+}
+
+function parseNonNegativeInt(
+  raw: string | undefined,
+  fallback: number,
+): number {
+  if (raw == null || raw.trim() === '') return fallback;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return n;
 }
 
 function parsePath(raw: string | undefined, fallback: string): string {
@@ -54,6 +85,14 @@ export const billingConfig = registerAs(
     partnerPayoutReturnPath: parsePath(
       process.env.PARTNER_PAYOUT_RETURN_PATH,
       '/partner/income',
+    ),
+    expectedStripeFeePercent: parseNonNegativeFloat(
+      process.env.EXPECTED_STRIPE_FEE_PERCENT,
+      1.5,
+    ),
+    expectedStripeFixedCents: parseNonNegativeInt(
+      process.env.EXPECTED_STRIPE_FIXED_CENTS,
+      25,
     ),
   }),
 );

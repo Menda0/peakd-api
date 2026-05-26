@@ -64,21 +64,25 @@ describe('commercial-pricing', () => {
     expect(totalSum).toBeGreaterThan(baseSum);
   });
 
-  it('adds 20% community fee on checkout total', () => {
+  it('adds 20% platform retention (legacy: community fee) on checkout total', () => {
     expect(computeCheckoutTotal(50)).toEqual({
       basePeaks: 50,
       communityFeePeaks: 10,
+      platformRetentionPeaks: 10,
       totalPeaks: 60,
       communityFeePercent: 20,
+      platformRetentionPercent: 20,
     });
   });
 
-  it('waives community fee for undisclosed locations', () => {
+  it('waives platform retention for undisclosed locations', () => {
     expect(computeCheckoutTotal(50, { waiveCommunityFee: true })).toEqual({
       basePeaks: 50,
       communityFeePeaks: 0,
+      platformRetentionPeaks: 0,
       totalPeaks: 50,
       communityFeePercent: 20,
+      platformRetentionPercent: 20,
     });
     const lines = allocateBuyClaimLineBreakdowns(settings, 2, {
       waiveCommunityFee: true,
@@ -86,6 +90,14 @@ describe('commercial-pricing', () => {
     expect(lines.every((l) => l.communityFeePeaks === 0)).toBe(true);
     expect(lines.reduce((s, l) => s + l.totalPeaks, 0)).toBe(
       lines.reduce((s, l) => s + l.basePeaks, 0),
+    );
+  });
+
+  it('dual-writes platformRetentionPeaks alongside communityFeePeaks', () => {
+    const breakdown = computeCheckoutTotal(100);
+    expect(breakdown.communityFeePeaks).toBe(breakdown.platformRetentionPeaks);
+    expect(breakdown.communityFeePercent).toBe(
+      breakdown.platformRetentionPercent,
     );
   });
 });
