@@ -47,13 +47,13 @@ export class PayoutsController {
   @Post('withdraw')
   withdraw(
     @AuthUserId() userId: string,
-    @Body() body: { peaksAmount?: unknown },
+    @Body() body: { amountCents?: unknown },
   ) {
-    const raw = body?.peaksAmount;
-    const peaksAmount = typeof raw === 'number' ? raw : Number(raw);
-    if (!Number.isFinite(peaksAmount) || peaksAmount <= 0) {
-      throw new BadRequestException('peaksAmount must be a positive number');
+    const raw = body?.amountCents;
+    const amountCents = typeof raw === 'number' ? raw : Number(raw);
+    if (!Number.isFinite(amountCents) || amountCents <= 0) {
+      throw new BadRequestException('amountCents must be a positive number');
     }
-    return this.payouts.requestWithdrawal(userId, Math.floor(peaksAmount));
+    return this.payouts.requestWithdrawal(userId, Math.floor(amountCents));
   }
 }
