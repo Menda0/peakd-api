@@ -33,6 +33,7 @@ import type { CommercialSettings } from '../commercial/commercial-settings.types
 import { VideoJob } from '../video/schemas/video-job.schema';
 import type { VideoJobStatus } from '../video/schemas/video-job.schema';
 import type { VideoClaimStatus } from '../video/schemas/video-job.schema';
+import { VideoShaka } from './schemas/video-shaka.schema';
 import {
   buildCursorMatchFilter,
   decodeDiscoverCursor,
@@ -141,6 +142,7 @@ export interface DiscoverFeedItemDto {
   location: DiscoverFeedLocationDto;
   session: DiscoverFeedSessionDto;
   shakaCount: number;
+  shakaedByViewer: boolean;
   followedByViewer: boolean;
   claimStatus: VideoClaimStatus;
   uploadSource: 'studio' | 'personal';
@@ -320,10 +322,100 @@ export class FeedService {
     private readonly regionModel: Model<Region>,
     @InjectModel(Spot.name)
     private readonly spotModel: Model<Spot>,
+    @InjectModel(VideoShaka.name)
+    private readonly videoShakaModel: Model<VideoShaka>,
     private readonly s3: S3Service,
     private readonly config: ConfigService,
     private readonly commercialWave: CommercialWaveService,
   ) {}
+
+  private async getShakaInfo(
+    jobIds: string[],
+    viewerUserId: string,
+  ): Promise<Map<string, { count: number; viewerShaka: boolean }>> {
+    const result = new Map<string, { count: number; viewerShaka: boolean }>();
+    const ids = Array.from(new Set(jobIds.filter((id) => id?.trim())));
+    if (ids.length === 0) return result;
+    for (const id of ids) {
+      result.set(id, { count: 0, viewerShaka: false });
+    }
+    const [counts, viewerRows] = await Promise.all([
+      this.videoShakaModel
+        .aggregate<{ _id: string; count: number }>([
+          { $match: { jobId: { $in: ids } } },
+          { $group: { _id: '$jobId', count: { $sum: 1 } } },
+        ])
+        .exec(),
+      this.videoShakaModel
+        .find({ jobId: { $in: ids }, userId: viewerUserId })
+        .lean()
+        .exec(),
+    ]);
+    for (const row of counts) {
+      const entry = result.get(row._id);
+      if (entry) entry.count = row.count;
+    }
+    for (const row of viewerRows) {
+      const entry = result.get(row.jobId);
+      if (entry) entry.viewerShaka = true;
+    }
+    return result;
+  }
+
+  private shakaInfoFor(
+    map: Map<string, { count: number; viewerShaka: boolean }> | null,
+    jobId: string,
+  ): { count: number; viewerShaka: boolean } {
+    return map?.get(jobId) ?? { count: 0, viewerShaka: false };
+  }
+
+  async shakaVideo(
+    userId: string,
+    jobId: string,
+  ): Promise<{ shakaCount: number; shakaedByViewer: boolean }> {
+    const trimmedJobId = jobId?.trim();
+    if (!trimmedJobId) {
+      throw new BadRequestException('jobId is required');
+    }
+    const job = await this.videoJobModel
+      .findOne({ jobId: trimmedJobId })
+      .lean()
+      .exec();
+    if (!job) {
+      throw new NotFoundException('Video not found');
+    }
+    try {
+      await this.videoShakaModel.create({
+        jobId: trimmedJobId,
+        userId,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      const code = (err as { code?: number } | null)?.code;
+      if (code !== 11000) throw err;
+    }
+    const count = await this.videoShakaModel
+      .countDocuments({ jobId: trimmedJobId })
+      .exec();
+    return { shakaCount: count, shakaedByViewer: true };
+  }
+
+  async unshakaVideo(
+    userId: string,
+    jobId: string,
+  ): Promise<{ shakaCount: number; shakaedByViewer: boolean }> {
+    const trimmedJobId = jobId?.trim();
+    if (!trimmedJobId) {
+      throw new BadRequestException('jobId is required');
+    }
+    await this.videoShakaModel
+      .deleteOne({ jobId: trimmedJobId, userId })
+      .exec();
+    const count = await this.videoShakaModel
+      .countDocuments({ jobId: trimmedJobId })
+      .exec();
+    return { shakaCount: count, shakaedByViewer: false };
+  }
 
   private parseLimit(raw: string | undefined): number {
     if (!raw?.trim()) return DEFAULT_LIMIT;
@@ -1073,9 +1165,15 @@ export class FeedService {
       .lean()
       .exec();
 
+    const shakaInfo = await this.getShakaInfo(
+      rows.map((r) => r.jobId),
+      viewerUserId,
+    );
     const items: DiscoverFeedItemDto[] = [];
     for (const doc of rows) {
-      items.push(await this.docToDiscoverDto(doc, 'processing', viewerUserId));
+      items.push(
+        await this.docToDiscoverDto(doc, 'processing', viewerUserId, shakaInfo),
+      );
     }
     return items;
   }
@@ -1107,12 +1205,17 @@ export class FeedService {
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
     );
 
+    const shakaInfo = await this.getShakaInfo(
+      sorted.map((d) => d.jobId),
+      userId,
+    );
     const items: MyVideoItemDto[] = [];
     for (const doc of sorted) {
       const dto = await this.docToDiscoverDto(
         doc,
         this.normalizeStatus(doc),
         userId,
+        shakaInfo,
       );
       const isViewerSurfer =
         (doc.uploadSource === 'personal' && doc.claimStatus === 'auto') ||
@@ -1306,9 +1409,13 @@ export class FeedService {
     const hasMore = rows.length > limit;
     const pageRows = hasMore ? rows.slice(0, limit) : rows;
 
+    const shakaInfo = await this.getShakaInfo(
+      pageRows.map((r) => r.jobId),
+      viewerUserId,
+    );
     const discoverItems: DiscoverFeedItemDto[] = [];
     for (const row of pageRows) {
-      discoverItems.push(await this.rowToDto(row, viewerUserId));
+      discoverItems.push(await this.rowToDto(row, viewerUserId, shakaInfo));
     }
 
     let items = discoverItems;
@@ -1396,6 +1503,7 @@ export class FeedService {
     },
     status: VideoJobStatus,
     viewerUserId: string,
+    shakaInfoMap?: Map<string, { count: number; viewerShaka: boolean }> | null,
   ): Promise<DiscoverFeedItemDto> {
     const sessionId = doc.surfSessionId?.trim();
     if (!sessionId) {
@@ -1458,6 +1566,12 @@ export class FeedService {
       this.resolveFeedSurfer(doc),
     ]);
 
+    const shakaInfo = shakaInfoMap
+      ? this.shakaInfoFor(shakaInfoMap, doc.jobId)
+      : await this.getShakaInfo([doc.jobId], viewerUserId).then((m) =>
+          this.shakaInfoFor(m, doc.jobId),
+        );
+
     return {
       jobId: doc.jobId,
       createdAt: doc.createdAt,
@@ -1472,7 +1586,8 @@ export class FeedService {
         isUndisclosed,
       },
       session: this.sessionToDto(session),
-      shakaCount: 0,
+      shakaCount: shakaInfo.count,
+      shakaedByViewer: shakaInfo.viewerShaka,
       followedByViewer: false,
       claimStatus: doc.claimStatus ?? 'none',
       uploadSource: doc.uploadSource === 'personal' ? 'personal' : 'studio',
@@ -1486,6 +1601,7 @@ export class FeedService {
   private async rowToDto(
     row: AggregatedRow,
     viewerUserId: string,
+    shakaInfoMap?: Map<string, { count: number; viewerShaka: boolean }> | null,
   ): Promise<DiscoverFeedItemDto> {
     const session = row.session;
     const countryCode = session.countryCode;
@@ -1541,6 +1657,12 @@ export class FeedService {
       this.resolveFeedSurfer(row),
     ]);
 
+    const shakaInfo = shakaInfoMap
+      ? this.shakaInfoFor(shakaInfoMap, row.jobId)
+      : await this.getShakaInfo([row.jobId], viewerUserId).then((m) =>
+          this.shakaInfoFor(m, row.jobId),
+        );
+
     return {
       jobId: row.jobId,
       createdAt: row.createdAt,
@@ -1555,7 +1677,8 @@ export class FeedService {
         isUndisclosed,
       },
       session: this.sessionToDto(session),
-      shakaCount: 0,
+      shakaCount: shakaInfo.count,
+      shakaedByViewer: shakaInfo.viewerShaka,
       followedByViewer: false,
       claimStatus: row.claimStatus ?? 'none',
       uploadSource: row.uploadSource === 'personal' ? 'personal' : 'studio',
