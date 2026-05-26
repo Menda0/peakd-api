@@ -1,3 +1,28 @@
+/**
+ * Commercial wave-unlock pricing.
+ *
+ * Money flow on a single unlock:
+ *
+ *   buyer pays  (basePeaks + platformRetentionPeaks)  ──┐
+ *                                                       │
+ *                ┌── basePeaks  →  partnerEarningsCents (EUR, withdrawable)
+ *                │
+ *                └── platformRetentionPeaks  →  burned from circulation
+ *                                                (no credit to any account)
+ *
+ * The retention Peaks are deliberately *not* held as a per-region or
+ * per-community liability. Their fiat equivalent sits in the platform's
+ * Stripe balance and is used at the admin's discretion to fund community
+ * awards, ops, infrastructure, etc. Historically this surcharge was named
+ * "community fee" because that was the dominant intended use, but the
+ * payout to communities has always been discretionary, not automatic.
+ *
+ * Field-name conventions:
+ *   - `communityFeePeaks` / `communityFeePercent` — legacy field names
+ *     preserved on the DB ledger + API DTOs for backwards compatibility.
+ *   - `platformRetentionPeaks` / `platformRetentionPercent` — canonical
+ *     names introduced alongside; new code should prefer these.
+ */
 import { BadRequestException } from '@nestjs/common';
 import type { CommercialSettings, VolumeDiscountTier } from './commercial-settings.types';
 
@@ -129,17 +154,42 @@ export function computeSponsorPeaks(
   return settings.videoPricePeaks * q;
 }
 
-export const COMMUNITY_FEE_PERCENT = 20;
+/**
+ * Surcharge percent the platform retains on each wave unlock, on top of the
+ * `basePeaks` price that's converted into partner earnings.
+ *
+ * Policy: this Peaks amount is debited from the buyer at unlock time but
+ * **credited to nobody** — the fiat equivalent stays in the platform's
+ * Stripe balance as operational retention. It is used at the admin's
+ * discretion to fund community / region awards, but it is *not* held as a
+ * per-region liability and no automatic payout pipeline drains it.
+ *
+ * The legacy name `COMMUNITY_FEE_PERCENT` is preserved as an alias so
+ * existing imports continue to compile during the rename.
+ */
+export const PLATFORM_RETENTION_PERCENT = 20;
+
+/** @deprecated Use {@link PLATFORM_RETENTION_PERCENT}. */
+export const COMMUNITY_FEE_PERCENT = PLATFORM_RETENTION_PERCENT;
 
 export type CheckoutPeaksBreakdown = {
   basePeaks: number;
+  /** Legacy field — same value as `platformRetentionPeaks`. */
   communityFeePeaks: number;
+  /** Canonical name for the retention Peaks. Equal to `communityFeePeaks`. */
+  platformRetentionPeaks: number;
   totalPeaks: number;
+  /** Legacy field — same value as `platformRetentionPercent`. */
   communityFeePercent: number;
+  platformRetentionPercent: number;
 };
 
 export type CheckoutOptions = {
-  /** When true, no community fee is charged or attributed (undisclosed locations). */
+  /**
+   * When true, no platform retention is charged (undisclosed locations).
+   * Historically named `waiveCommunityFee` — kept as the field name for
+   * backwards compatibility with existing call sites.
+   */
   waiveCommunityFee?: boolean;
 };
 
@@ -152,19 +202,23 @@ export function computeCheckoutTotal(
     return {
       basePeaks: base,
       communityFeePeaks: 0,
+      platformRetentionPeaks: 0,
       totalPeaks: base,
-      communityFeePercent: COMMUNITY_FEE_PERCENT,
+      communityFeePercent: PLATFORM_RETENTION_PERCENT,
+      platformRetentionPercent: PLATFORM_RETENTION_PERCENT,
     };
   }
-  const communityFeePeaks = Math.max(
+  const retentionPeaks = Math.max(
     1,
-    Math.round((base * COMMUNITY_FEE_PERCENT) / 100),
+    Math.round((base * PLATFORM_RETENTION_PERCENT) / 100),
   );
   return {
     basePeaks: base,
-    communityFeePeaks,
-    totalPeaks: base + communityFeePeaks,
-    communityFeePercent: COMMUNITY_FEE_PERCENT,
+    communityFeePeaks: retentionPeaks,
+    platformRetentionPeaks: retentionPeaks,
+    totalPeaks: base + retentionPeaks,
+    communityFeePercent: PLATFORM_RETENTION_PERCENT,
+    platformRetentionPercent: PLATFORM_RETENTION_PERCENT,
   };
 }
 

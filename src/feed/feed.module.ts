@@ -14,6 +14,7 @@ import { UserProfile, UserProfileSchema } from '../users/schemas/user-profile.sc
 import { VideoJob, VideoJobSchema } from '../video/schemas/video-job.schema';
 import { FeedController } from './feed.controller';
 import { FeedService } from './feed.service';
+import { VideoShaka, VideoShakaSchema } from './schemas/video-shaka.schema';
 
 @Module({
   imports: [
@@ -26,6 +27,7 @@ import { FeedService } from './feed.service';
       { name: PartnerProfile.name, schema: PartnerProfileSchema },
       { name: Region.name, schema: RegionSchema },
       { name: Spot.name, schema: SpotSchema },
+      { name: VideoShaka.name, schema: VideoShakaSchema },
     ]),
   ],
   controllers: [FeedController],

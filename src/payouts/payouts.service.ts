@@ -4,6 +4,7 @@ import {
   Injectable,
   InternalServerErrorException,
   Logger,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
@@ -16,21 +17,23 @@ import {
 } from '../config/billing.config';
 import { WaveUnlockPurchase } from '../commercial/schemas/wave-unlock-purchase.schema';
 import { PartnerProfile } from '../partner/schemas/partner-profile.schema';
+import { S3Service } from '../s3/s3.service';
 import { UserProfile } from '../users/schemas/user-profile.schema';
+import { VideoJob } from '../video/schemas/video-job.schema';
 import {
   PartnerWithdrawal,
   type PartnerWithdrawalStatus,
 } from './schemas/partner-withdrawal.schema';
+
+/** Cap on snapshot previews per earnings row (matches the UI ask). */
+const EARNINGS_PREVIEW_MAX = 3;
 
 const COUNTRY_CODE = /^[A-Z]{2}$/;
 
 export type PartnerOnboardingStatus = 'not_started' | 'pending' | 'enabled';
 
 export interface PartnerPayoutsStatusDto {
-  withdrawablePeaks: number;
-  peaksPerEuro: number;
   withdrawableAmountCents: number;
-  minWithdrawalPeaks: number;
   minWithdrawalAmountCents: number;
   currency: 'eur';
   onboardingStatus: PartnerOnboardingStatus;
@@ -41,7 +44,6 @@ export interface PartnerPayoutsStatusDto {
 
 export interface PartnerWithdrawalDto {
   id: string;
-  peaksDebited: number;
   amountCents: number;
   currency: string;
   status: PartnerWithdrawalStatus;
@@ -49,15 +51,23 @@ export interface PartnerWithdrawalDto {
   createdAt: string;
 }
 
+export interface PartnerEarningBuyerDto {
+  userId: string;
+  displayName: string | null;
+  avatarUrl: string | null;
+}
+
 export interface PartnerEarningRowDto {
   id: string;
   jobId: string;
-  basePeaks: number;
-  peaksCharged: number;
+  amountCents: number;
   countryCode: string;
   regionId: string;
   type: string;
   createdAt: string;
+  buyer: PartnerEarningBuyerDto;
+  /** Up to `EARNINGS_PREVIEW_MAX` snapshot URLs for the unlocked video. */
+  previewThumbnailUrls: string[];
 }
 
 export interface PartnerEarningsPageDto {
@@ -81,6 +91,9 @@ export class PayoutsService {
     private readonly partnerWithdrawalModel: Model<PartnerWithdrawal>,
     @InjectModel(WaveUnlockPurchase.name)
     private readonly waveUnlockPurchaseModel: Model<WaveUnlockPurchase>,
+    @InjectModel(VideoJob.name)
+    private readonly videoJobModel: Model<VideoJob>,
+    private readonly s3: S3Service,
   ) {}
 
   private billing(): BillingConfigValues {
@@ -99,10 +112,6 @@ export class PayoutsService {
     }
     this.stripeClient = new Stripe(secret);
     return this.stripeClient;
-  }
-
-  private peaksToCents(peaks: number, peaksPerEuro: number): number {
-    return Math.floor((peaks * 100) / peaksPerEuro);
   }
 
   private async loadPartner(userId: string): Promise<{
@@ -129,18 +138,17 @@ export class PayoutsService {
     };
   }
 
-  private async getEarningsPeaks(userId: string): Promise<number> {
+  private async getEarningsCents(userId: string): Promise<number> {
     const doc = await this.userProfileModel
       .findOne({ userId })
-      .select({ partnerEarningsPeaks: 1 })
+      .select({ partnerEarningsCents: 1 })
       .lean()
       .exec();
-    return Math.max(0, doc?.partnerEarningsPeaks ?? 0);
+    return Math.max(0, doc?.partnerEarningsCents ?? 0);
   }
 
   private toWithdrawalDto(doc: {
     _id: unknown;
-    peaksDebited: number;
     amountCents: number;
     currency: string;
     status: PartnerWithdrawalStatus;
@@ -149,7 +157,6 @@ export class PayoutsService {
   }): PartnerWithdrawalDto {
     return {
       id: String(doc._id),
-      peaksDebited: doc.peaksDebited,
       amountCents: doc.amountCents,
       currency: doc.currency,
       status: doc.status,
@@ -175,21 +182,28 @@ export class PayoutsService {
 
   async getStatus(userId: string): Promise<PartnerPayoutsStatusDto> {
     const b = this.billing();
-    const [partner, withdrawablePeaks, recentDocs] = await Promise.all([
-      this.loadPartner(userId),
-      this.getEarningsPeaks(userId),
-      this.partnerWithdrawalModel
-        .find({ userId })
-        .sort({ createdAt: -1 })
-        .limit(10)
-        .lean()
-        .exec(),
-    ]);
+    const [partnerInitial, withdrawableAmountCents, recentDocs] =
+      await Promise.all([
+        this.loadPartner(userId),
+        this.getEarningsCents(userId),
+        this.partnerWithdrawalModel
+          .find({ userId })
+          .sort({ createdAt: -1 })
+          .limit(10)
+          .lean()
+          .exec(),
+      ]);
+
+    // Webhooks (`account.updated`) are eventually consistent, so when the user
+    // just returned from Stripe Connect onboarding the cached flags may still
+    // be stale. Reconcile live against Stripe whenever we have an account but
+    // haven't seen it become fully enabled yet — this is the recommended
+    // pattern over relying solely on the webhook.
+    const partner = await this.reconcileConnectAccount(userId, partnerInitial);
 
     const recentWithdrawals = recentDocs.map((d) =>
       this.toWithdrawalDto({
         _id: d._id,
-        peaksDebited: d.peaksDebited,
         amountCents: d.amountCents,
         currency: d.currency,
         status: d.status,
@@ -199,17 +213,8 @@ export class PayoutsService {
     );
 
     return {
-      withdrawablePeaks,
-      peaksPerEuro: b.peaksPerEuro,
-      withdrawableAmountCents: this.peaksToCents(
-        withdrawablePeaks,
-        b.peaksPerEuro,
-      ),
-      minWithdrawalPeaks: b.partnerMinWithdrawalPeaks,
-      minWithdrawalAmountCents: this.peaksToCents(
-        b.partnerMinWithdrawalPeaks,
-        b.peaksPerEuro,
-      ),
+      withdrawableAmountCents,
+      minWithdrawalAmountCents: b.partnerMinWithdrawalCents,
       currency: 'eur',
       onboardingStatus: this.resolveOnboardingStatus(partner),
       payoutsEnabled: partner.stripeConnectPayoutsEnabled,
@@ -218,10 +223,36 @@ export class PayoutsService {
     };
   }
 
+  private async reconcileConnectAccount(
+    userId: string,
+    partner: Awaited<ReturnType<PayoutsService['loadPartner']>>,
+  ): Promise<Awaited<ReturnType<PayoutsService['loadPartner']>>> {
+    if (!partner.stripeConnectAccountId) return partner;
+    const cachedEnabled =
+      partner.stripeConnectPayoutsEnabled &&
+      partner.stripeConnectRequirementsDue.length === 0;
+    if (cachedEnabled) return partner;
+    try {
+      const live = await this.stripe().accounts.retrieve(
+        partner.stripeConnectAccountId,
+      );
+      await this.syncConnectAccountFromEvent(live);
+      return await this.loadPartner(userId);
+    } catch (err) {
+      this.logger.warn(
+        `Failed to refresh Stripe Connect account ${partner.stripeConnectAccountId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return partner;
+    }
+  }
+
   async listEarnings(
     userId: string,
     options: { limit?: number; cursor?: string } = {},
   ): Promise<PartnerEarningsPageDto> {
+    const b = this.billing();
     const limit = Math.min(100, Math.max(1, options.limit ?? 20));
     const query: Record<string, unknown> = { partnerUserId: userId };
     if (options.cursor?.trim()) {
@@ -236,20 +267,143 @@ export class PayoutsService {
       .exec();
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
-    const items: PartnerEarningRowDto[] = page.map((row) => ({
-      id: String(row._id),
-      jobId: row.jobId,
-      basePeaks: row.basePeaks ?? 0,
-      peaksCharged: row.peaksCharged ?? 0,
-      countryCode: row.countryCode ?? '',
-      regionId: row.regionId ?? '',
-      type: row.type,
-      createdAt: row.createdAt,
-    }));
+
+    // Batch the buyer + video lookups so we don't N+1 the database while
+    // rendering the earnings list.
+    const buyerIds = [
+      ...new Set(
+        page
+          .map((r) => r.buyerUserId?.trim())
+          .filter((s): s is string => Boolean(s)),
+      ),
+    ];
+    const jobIds = [
+      ...new Set(
+        page
+          .map((r) => r.jobId?.trim())
+          .filter((s): s is string => Boolean(s)),
+      ),
+    ];
+    const [buyersByUserId, thumbsByJobId] = await Promise.all([
+      this.buyersByUserId(buyerIds),
+      this.previewThumbnailsByJobId(jobIds),
+    ]);
+
+    const items: PartnerEarningRowDto[] = page.map((row) => {
+      // New rows persist `partnerEarningsCents` at unlock time; legacy rows
+      // pre-dating the pivot don't, so fall back to the live conversion.
+      const persistedCents =
+        typeof row.partnerEarningsCents === 'number'
+          ? row.partnerEarningsCents
+          : null;
+      const amountCents =
+        persistedCents ??
+        Math.floor(((row.basePeaks ?? 0) * 100) / b.peaksPerEuro);
+      const buyer = buyersByUserId.get(row.buyerUserId) ?? {
+        userId: row.buyerUserId,
+        displayName: null,
+        avatarUrl: null,
+      };
+      return {
+        id: String(row._id),
+        jobId: row.jobId,
+        amountCents,
+        countryCode: row.countryCode ?? '',
+        regionId: row.regionId ?? '',
+        type: row.type,
+        createdAt: row.createdAt,
+        buyer,
+        previewThumbnailUrls: thumbsByJobId.get(row.jobId) ?? [],
+      };
+    });
     const nextCursor = hasMore
       ? (page[page.length - 1]!.createdAt ?? null)
       : null;
     return { items, nextCursor };
+  }
+
+  /** Avatar URL resolution mirrors `AdminPeaksService.resolveAvatarUrl`. */
+  private async resolveAvatarUrl(
+    avatarKey: string | null,
+  ): Promise<string | null> {
+    if (!avatarKey?.trim()) return null;
+    const publicBase = this.config.get<string>('S3_PUBLIC_BASE_URL')?.trim();
+    if (publicBase) {
+      return `${publicBase.replace(/\/+$/, '')}/${avatarKey.trim()}`;
+    }
+    const expiry = Number(
+      this.config.get<string>('USER_AVATAR_GET_URL_EXPIRY_SECONDS') ?? '604800',
+    );
+    return this.s3.presignedGetUrl(avatarKey.trim(), expiry);
+  }
+
+  private async buyersByUserId(
+    userIds: string[],
+  ): Promise<Map<string, PartnerEarningBuyerDto>> {
+    const out = new Map<string, PartnerEarningBuyerDto>();
+    if (userIds.length === 0) return out;
+
+    const profiles = await this.userProfileModel
+      .find({ userId: { $in: userIds } })
+      .select({ userId: 1, displayName: 1, nickname: 1, avatarKey: 1 })
+      .lean()
+      .exec();
+
+    // Presign once per unique avatar key so multiple buyers sharing one
+    // avatar (rare but possible) don't trigger duplicate signing work.
+    const avatarUrlByKey = new Map<string, string | null>();
+    for (const profile of profiles) {
+      const key = profile.avatarKey?.trim();
+      if (key && !avatarUrlByKey.has(key)) {
+        avatarUrlByKey.set(key, await this.resolveAvatarUrl(key));
+      }
+      const displayName =
+        profile.displayName?.trim() || profile.nickname?.trim() || null;
+      out.set(profile.userId, {
+        userId: profile.userId,
+        displayName,
+        avatarUrl: key ? (avatarUrlByKey.get(key) ?? null) : null,
+      });
+    }
+    for (const userId of userIds) {
+      if (!out.has(userId)) {
+        out.set(userId, { userId, displayName: null, avatarUrl: null });
+      }
+    }
+    return out;
+  }
+
+  private async previewThumbnailsByJobId(
+    jobIds: string[],
+  ): Promise<Map<string, string[]>> {
+    const out = new Map<string, string[]>();
+    if (jobIds.length === 0) return out;
+    const jobs = await this.videoJobModel
+      .find({ jobId: { $in: jobIds } })
+      .select({ jobId: 1, snapshotKeys: 1 })
+      .lean()
+      .exec();
+    // Presign every unique snapshot key once and dedupe across rows.
+    const urlByKey = new Map<string, string>();
+    for (const job of jobs) {
+      const keys = (job.snapshotKeys ?? []).slice(0, EARNINGS_PREVIEW_MAX);
+      const urls: string[] = [];
+      for (const key of keys) {
+        const trimmed = key?.trim();
+        if (!trimmed) continue;
+        let url = urlByKey.get(trimmed);
+        if (!url) {
+          url = await this.s3.presignedGetUrl(trimmed);
+          urlByKey.set(trimmed, url);
+        }
+        urls.push(url);
+      }
+      out.set(job.jobId, urls);
+    }
+    for (const id of jobIds) {
+      if (!out.has(id)) out.set(id, []);
+    }
+    return out;
   }
 
   /**
@@ -314,22 +468,21 @@ export class PayoutsService {
   }
 
   /**
-   * Debits `partnerEarningsPeaks`, persists a pending withdrawal, then creates
+   * Debits `partnerEarningsCents`, persists a pending withdrawal, then creates
    * a Stripe Transfer to the connected account. On Stripe failure the debit is
    * reverted and the withdrawal is marked failed.
    */
   async requestWithdrawal(
     userId: string,
-    peaksAmount: number,
+    amountCents: number,
   ): Promise<PartnerWithdrawalDto> {
-    if (!Number.isInteger(peaksAmount) || peaksAmount < 1) {
-      throw new BadRequestException('peaksAmount must be a positive integer');
+    if (!Number.isInteger(amountCents) || amountCents < 1) {
+      throw new BadRequestException('amountCents must be a positive integer');
     }
     const b = this.billing();
-    if (peaksAmount < b.partnerMinWithdrawalPeaks) {
-      throw new BadRequestException(
-        `Minimum withdrawal is ${b.partnerMinWithdrawalPeaks} Peaks`,
-      );
+    if (amountCents < b.partnerMinWithdrawalCents) {
+      const min = (b.partnerMinWithdrawalCents / 100).toFixed(2);
+      throw new BadRequestException(`Minimum withdrawal is €${min}`);
     }
 
     const partner = await this.loadPartner(userId);
@@ -347,10 +500,13 @@ export class PayoutsService {
       );
     }
 
-    const amountCents = this.peaksToCents(peaksAmount, b.peaksPerEuro);
-    if (amountCents < 1) {
-      throw new BadRequestException('Withdrawal amount must be at least 1 cent');
-    }
+    // Pre-flight: confirm the platform's EUR available balance can fund this
+    // transfer *before* we debit the in-DB ledger. Stripe's own
+    // "insufficient available funds" exception is hard to interpret for end
+    // users (it conflates test-mode pending balances, settlement delays, and
+    // currency-bucket mismatches), so we translate it into a 503 with a clear
+    // message and skip the wasted DB write + rollback dance.
+    await this.assertStripeBalanceCovers(amountCents);
 
     const idempotencyKey = `wd_${userId}_${randomUUID()}`;
     const stripeAccountId = partner.stripeConnectAccountId;
@@ -361,24 +517,22 @@ export class PayoutsService {
     try {
       const debited = await this.userProfileModel
         .findOneAndUpdate(
-          { userId, partnerEarningsPeaks: { $gte: peaksAmount } },
-          { $inc: { partnerEarningsPeaks: -peaksAmount } },
+          { userId, partnerEarningsCents: { $gte: amountCents } },
+          { $inc: { partnerEarningsCents: -amountCents } },
           { session: mongoSession, returnDocument: 'after' },
         )
         .lean()
         .exec();
       if (!debited) {
-        throw new BadRequestException('Insufficient withdrawable Peaks');
+        throw new BadRequestException('Insufficient withdrawable balance');
       }
       const created = await this.partnerWithdrawalModel.create(
         [
           {
             userId,
             stripeAccountId,
-            peaksDebited: peaksAmount,
             amountCents,
             currency: 'eur',
-            peaksPerEuro: b.peaksPerEuro,
             idempotencyKey,
             stripeTransferId: null,
             status: 'pending',
@@ -407,12 +561,11 @@ export class PayoutsService {
           amount: amountCents,
           currency: 'eur',
           destination: stripeAccountId,
-          description: `Peakd partner withdrawal (${peaksAmount} Peaks)`,
+          description: `Peakd partner withdrawal (€${(amountCents / 100).toFixed(2)})`,
           metadata: {
             userId,
             withdrawalId,
-            peaksDebited: String(peaksAmount),
-            peaksPerEuro: String(b.peaksPerEuro),
+            amountCents: String(amountCents),
           },
         },
         { idempotencyKey },
@@ -421,7 +574,7 @@ export class PayoutsService {
       await this.refundFailedWithdrawal(
         userId,
         withdrawalId,
-        peaksAmount,
+        amountCents,
         err instanceof Error ? err.message : 'Stripe transfer failed',
       );
       const msg = err instanceof Error ? err.message : 'Stripe transfer failed';
@@ -447,7 +600,6 @@ export class PayoutsService {
     }
     return this.toWithdrawalDto({
       _id: updated._id,
-      peaksDebited: updated.peaksDebited,
       amountCents: updated.amountCents,
       currency: updated.currency,
       status: updated.status,
@@ -456,11 +608,52 @@ export class PayoutsService {
     });
   }
 
+  /**
+   * Queries Stripe's platform-side `Balance` and rejects the withdrawal early
+   * if the EUR available bucket can't cover `amountCents`. Surfaces a 503 so
+   * the FE can treat it as a transient "try again later" state distinct from
+   * the user's own balance being too low (which is a 400).
+   *
+   * Network errors fall through as warnings — we'd rather let the real
+   * `transfers.create` call surface them than block legitimate withdrawals on
+   * an admin-side outage.
+   */
+  private async assertStripeBalanceCovers(amountCents: number): Promise<void> {
+    let balance: Stripe.Balance;
+    try {
+      balance = await this.stripe().balance.retrieve();
+    } catch (err) {
+      this.logger.warn(
+        `Failed to retrieve Stripe balance for pre-flight check: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return;
+    }
+    const availableEur = (balance.available ?? []).find(
+      (b) => (b.currency ?? '').toLowerCase() === 'eur',
+    );
+    const availableCents = availableEur?.amount ?? 0;
+    if (availableCents >= amountCents) return;
+    const pendingEur = (balance.pending ?? []).find(
+      (b) => (b.currency ?? '').toLowerCase() === 'eur',
+    );
+    const pendingCents = pendingEur?.amount ?? 0;
+    this.logger.warn(
+      `Stripe EUR balance below withdrawal: need=${amountCents} available=${availableCents} pending=${pendingCents}`,
+    );
+    throw new ServiceUnavailableException(
+      pendingCents > 0
+        ? 'Funds are still settling with Stripe. Please try again in a few days.'
+        : 'The platform is temporarily unable to process withdrawals. Please try again later.',
+    );
+  }
+
   /** Reverts a debit + marks the withdrawal failed (transactional). */
   private async refundFailedWithdrawal(
     userId: string,
     withdrawalId: string,
-    peaks: number,
+    amountCents: number,
     reason: string,
   ): Promise<void> {
     const mongoSession = await this.connection.startSession();
@@ -469,7 +662,7 @@ export class PayoutsService {
       await this.userProfileModel
         .updateOne(
           { userId },
-          { $inc: { partnerEarningsPeaks: peaks } },
+          { $inc: { partnerEarningsCents: amountCents } },
           { session: mongoSession },
         )
         .exec();
@@ -517,26 +710,87 @@ export class PayoutsService {
     return { matched: res.matchedCount > 0 };
   }
 
-  /** Webhook hook: reconcile a withdrawal record from a transfer event. */
+  /**
+   * Webhook hook: reconcile a withdrawal record from a transfer event.
+   * On `transfer.reversed`, atomically refund `partnerEarningsCents` to the
+   * partner — *only* on the first transition out of a non-failed status, so
+   * webhook retries (or a sync `refundFailedWithdrawal` that already credited
+   * the partner) can't double-refund.
+   */
   async syncWithdrawalFromTransfer(
     transfer: Stripe.Transfer,
     eventType: string,
   ): Promise<{ matched: boolean }> {
-    const status: PartnerWithdrawalStatus =
-      eventType === 'transfer.reversed' ? 'failed' : 'completed';
-    const failureReason =
-      eventType === 'transfer.reversed' ? 'Stripe reversed the transfer' : null;
+    if (eventType === 'transfer.reversed') {
+      return this.applyTransferReversal(transfer);
+    }
     const res = await this.partnerWithdrawalModel
       .updateOne(
         { stripeTransferId: transfer.id },
-        {
-          $set: {
-            status,
-            ...(failureReason ? { failureReason } : {}),
-          },
-        },
+        { $set: { status: 'completed' as PartnerWithdrawalStatus } },
       )
       .exec();
     return { matched: res.matchedCount > 0 };
+  }
+
+  /**
+   * Atomically refunds a reversed transfer:
+   *   1. Find the withdrawal in a non-failed state and flip it to `failed`.
+   *      This `findOneAndUpdate` is the idempotency anchor — only the first
+   *      caller that observes `status !== 'failed'` proceeds to step 2.
+   *   2. Re-credit `partnerEarningsCents` on the partner's profile.
+   *
+   * Both writes run in a Mongo transaction so a refund cannot land without a
+   * status flip (or vice versa) under partial failure.
+   */
+  private async applyTransferReversal(
+    transfer: Stripe.Transfer,
+  ): Promise<{ matched: boolean }> {
+    const mongoSession = await this.connection.startSession();
+    mongoSession.startTransaction();
+    try {
+      const flipped = await this.partnerWithdrawalModel
+        .findOneAndUpdate(
+          { stripeTransferId: transfer.id, status: { $ne: 'failed' } },
+          {
+            $set: {
+              status: 'failed' as PartnerWithdrawalStatus,
+              failureReason: 'Stripe reversed the transfer',
+            },
+          },
+          { session: mongoSession, returnDocument: 'after' },
+        )
+        .lean()
+        .exec();
+      if (!flipped) {
+        // Either no record (untracked transfer) or already failed (replay).
+        // Roll back the empty transaction and tell Stripe we matched nothing
+        // for the untracked case; either way, no refund is owed.
+        await mongoSession.abortTransaction();
+        const exists = await this.partnerWithdrawalModel
+          .exists({ stripeTransferId: transfer.id })
+          .exec();
+        return { matched: Boolean(exists) };
+      }
+      await this.userProfileModel
+        .updateOne(
+          { userId: flipped.userId },
+          { $inc: { partnerEarningsCents: flipped.amountCents } },
+          { session: mongoSession },
+        )
+        .exec();
+      await mongoSession.commitTransaction();
+      return { matched: true };
+    } catch (err) {
+      await mongoSession.abortTransaction();
+      this.logger.error(
+        `Failed to apply transfer.reversed for ${transfer.id}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      throw err;
+    } finally {
+      void mongoSession.endSession();
+    }
   }
 }

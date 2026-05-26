@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -165,6 +166,24 @@ export class FeedController {
           }))
       : [];
     return this.feed.quoteUnlockCart(userId, items);
+  }
+
+  @Post('discover/videos/:jobId/shaka')
+  @HttpCode(HttpStatus.OK)
+  shakaVideo(
+    @AuthUserId() userId: string,
+    @Param('jobId') jobId: string,
+  ) {
+    return this.feed.shakaVideo(userId, jobId);
+  }
+
+  @Delete('discover/videos/:jobId/shaka')
+  @HttpCode(HttpStatus.OK)
+  unshakaVideo(
+    @AuthUserId() userId: string,
+    @Param('jobId') jobId: string,
+  ) {
+    return this.feed.unshakaVideo(userId, jobId);
   }
 
   @Post('discover/cart/buy-claim-batch')

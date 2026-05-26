@@ -73,9 +73,17 @@ export type AdminPeaksGeoRowDto = {
   regionId?: string;
   regionName?: string | null;
   transactionCount: number;
+  /** Legacy alias for `platformRetentionPeaks`. */
   communityFeePeaks: number;
+  /** Canonical name — equal to `communityFeePeaks`. */
+  platformRetentionPeaks: number;
   partnerPeaks: number;
   totalPeaksCharged: number;
+  /** EUR-cents equivalents derived at request time using `peaksPerEuro`. */
+  communityFeeEurCents: number;
+  platformRetentionEurCents: number;
+  partnerEurCents: number;
+  totalEurCents: number;
 };
 
 function parseGeoFilter(raw: {
@@ -327,12 +335,9 @@ export class AdminPeaksService {
       ])
       .exec();
 
-    return rows.map((row) => ({
+    const peaksPerEuro = this.peaksPerEuroValue();
+    return rows.map((row) => this.augmentGeoRow(row, peaksPerEuro, {
       countryCode: row._id,
-      transactionCount: row.transactionCount,
-      communityFeePeaks: row.communityFeePeaks,
-      partnerPeaks: row.partnerPeaks,
-      totalPeaksCharged: row.totalPeaksCharged,
     }));
   }
 
@@ -377,16 +382,15 @@ export class AdminPeaksService {
 
     const regionIds = rows.map((r) => r._id);
     const regionNameById = await this.regionNamesById(regionIds);
+    const peaksPerEuro = this.peaksPerEuroValue();
 
-    return rows.map((row) => ({
-      countryCode,
-      regionId: row._id,
-      regionName: regionNameById.get(row._id) ?? null,
-      transactionCount: row.transactionCount,
-      communityFeePeaks: row.communityFeePeaks,
-      partnerPeaks: row.partnerPeaks,
-      totalPeaksCharged: row.totalPeaksCharged,
-    }));
+    return rows.map((row) =>
+      this.augmentGeoRow(row, peaksPerEuro, {
+        countryCode,
+        regionId: row._id,
+        regionName: regionNameById.get(row._id) ?? null,
+      }),
+    );
   }
 
   async listAllByRegion(): Promise<AdminPeaksGeoRowDto[]> {
@@ -423,16 +427,68 @@ export class AdminPeaksService {
 
     const regionIds = [...new Set(rows.map((r) => r._id.regionId))];
     const regionNameById = await this.regionNamesById(regionIds);
+    const peaksPerEuro = this.peaksPerEuroValue();
 
-    return rows.map((row) => ({
-      countryCode: row._id.countryCode,
-      regionId: row._id.regionId,
-      regionName: regionNameById.get(row._id.regionId) ?? null,
+    return rows.map((row) =>
+      this.augmentGeoRow(row, peaksPerEuro, {
+        countryCode: row._id.countryCode,
+        regionId: row._id.regionId,
+        regionName: regionNameById.get(row._id.regionId) ?? null,
+      }),
+    );
+  }
+
+  private peaksPerEuroValue(): number {
+    const billing = this.config.get<BillingConfigValues>(BILLING_CONFIG_KEY);
+    return billing?.peaksPerEuro && billing.peaksPerEuro > 0
+      ? billing.peaksPerEuro
+      : 100;
+  }
+
+  /** Floor-based Peaks → EUR-cents conversion for admin readouts. */
+  private peaksToEurCents(peaks: number, peaksPerEuro: number): number {
+    if (!Number.isFinite(peaks) || peaks <= 0) return 0;
+    return Math.floor((peaks * 100) / peaksPerEuro);
+  }
+
+  /**
+   * Merges aggregation output with denormalized identifiers + the canonical
+   * `platformRetentionPeaks` alias + EUR-cent equivalents. Keeps the three
+   * geo-row producers (`listByCountry`, `listByRegion`, `listAllByRegion`)
+   * in lock-step so the FE renders the same fields everywhere.
+   */
+  private augmentGeoRow(
+    row: {
+      transactionCount: number;
+      communityFeePeaks: number;
+      partnerPeaks: number;
+      totalPeaksCharged: number;
+    },
+    peaksPerEuro: number,
+    identifiers: {
+      countryCode?: string;
+      regionId?: string;
+      regionName?: string | null;
+    },
+  ): AdminPeaksGeoRowDto {
+    return {
+      ...identifiers,
       transactionCount: row.transactionCount,
       communityFeePeaks: row.communityFeePeaks,
+      platformRetentionPeaks: row.communityFeePeaks,
       partnerPeaks: row.partnerPeaks,
       totalPeaksCharged: row.totalPeaksCharged,
-    }));
+      communityFeeEurCents: this.peaksToEurCents(
+        row.communityFeePeaks,
+        peaksPerEuro,
+      ),
+      platformRetentionEurCents: this.peaksToEurCents(
+        row.communityFeePeaks,
+        peaksPerEuro,
+      ),
+      partnerEurCents: this.peaksToEurCents(row.partnerPeaks, peaksPerEuro),
+      totalEurCents: this.peaksToEurCents(row.totalPeaksCharged, peaksPerEuro),
+    };
   }
 
   private async resolveAvatarUrl(avatarKey: string | null): Promise<string | null> {
