@@ -2,10 +2,16 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import type { Connection, Model } from 'mongoose';
+import {
+  BILLING_CONFIG_KEY,
+  type BillingConfigValues,
+} from '../config/billing.config';
 import { PartnerProfile } from '../partner/schemas/partner-profile.schema';
 import { SurfSession } from '../studio/schemas/surf-session.schema';
 import { UserProfile } from '../users/schemas/user-profile.schema';
@@ -16,7 +22,9 @@ import {
   computeCheckoutTotal,
   computeSponsorPeaks,
   resolveEffectiveCommercialSettings,
+  type CheckoutOptions,
 } from './commercial-pricing';
+import { isSessionLocationUndisclosed } from '../studio/geo-undisclosed';
 import type { CommercialSettings } from './commercial-settings.types';
 import { WaveUnlockPurchase } from './schemas/wave-unlock-purchase.schema';
 
@@ -36,6 +44,9 @@ export type CommercialWaveContext = {
   session: {
     sessionId: string;
     userId: string;
+    countryCode: string;
+    regionId: string;
+    spotId: string;
     isCommercial?: boolean;
     commercialSettings?: CommercialSettings | null;
   };
@@ -56,7 +67,25 @@ export class CommercialWaveService {
     private readonly userProfileModel: Model<UserProfile>,
     @InjectModel(WaveUnlockPurchase.name)
     private readonly waveUnlockPurchaseModel: Model<WaveUnlockPurchase>,
+    private readonly config: ConfigService,
   ) {}
+
+  private peaksPerEuro(): number {
+    const billing = this.config.get<BillingConfigValues>(BILLING_CONFIG_KEY);
+    const rate = billing?.peaksPerEuro;
+    if (!rate || rate <= 0) {
+      throw new InternalServerErrorException(
+        'PEAKS_PER_EURO is not configured',
+      );
+    }
+    return rate;
+  }
+
+  /** Money the partner earns from a single unlock, derived from base peaks. */
+  private partnerEarningsCents(basePeaks: number): number {
+    if (basePeaks <= 0) return 0;
+    return Math.floor((basePeaks * 100) / this.peaksPerEuro());
+  }
 
   private isCompleted(doc: { status?: string; processedKey?: string | null }): boolean {
     if (doc.status === 'completed') return true;
@@ -98,8 +127,52 @@ export class CommercialWaveService {
     }
     return {
       job: doc,
-      session: session as CommercialWaveContext['session'],
+      session: {
+        sessionId: session.sessionId,
+        userId: session.userId,
+        countryCode: session.countryCode,
+        regionId: session.regionId,
+        spotId: session.spotId,
+        isCommercial: session.isCommercial,
+        commercialSettings: session.commercialSettings as CommercialSettings | null,
+      },
       settings,
+    };
+  }
+
+  private checkoutOptions(ctx: CommercialWaveContext): CheckoutOptions {
+    const waiveCommunityFee = isSessionLocationUndisclosed(
+      ctx.session.countryCode,
+      ctx.session.regionId,
+      ctx.session.spotId,
+    );
+    return { waiveCommunityFee };
+  }
+
+  private buildPurchaseLedger(
+    ctx: CommercialWaveContext,
+    fields: {
+      jobId: string;
+      buyerUserId: string;
+      beneficiaryUserId: string;
+      type: 'buy_claim' | 'sponsor';
+      peaksCharged: number;
+      basePeaks: number;
+      partnerEarningsCents: number;
+      communityFeePeaks: number;
+      discountPercent: number;
+      createdAt: string;
+    },
+  ) {
+    return {
+      ...fields,
+      // Dual-write the canonical field name alongside the legacy one so
+      // new aggregations + admin views read the same value either way.
+      platformRetentionPeaks: fields.communityFeePeaks,
+      sessionId: ctx.session.sessionId,
+      partnerUserId: ctx.session.userId,
+      countryCode: ctx.session.countryCode,
+      regionId: ctx.session.regionId,
     };
   }
 
@@ -128,6 +201,40 @@ export class CommercialWaveService {
     }
   }
 
+  /**
+   * Credits the partner's withdrawable balance in EUR cents. Partners never
+   * accrue Peaks — Peaks are buyer-side currency only — so we convert the
+   * base Peaks list price into cents at unlock time using the current rate
+   * and persist the money directly to `partnerEarningsCents`.
+   */
+  private async creditPartnerEarningsCents(
+    userId: string,
+    amountCents: number,
+    mongoSession: import('mongoose').ClientSession,
+  ): Promise<void> {
+    if (amountCents < 1) {
+      // Sub-cent unlocks (e.g. very low list price) round down to 0 — skip
+      // the write rather than spamming a no-op increment.
+      return;
+    }
+    await this.userProfileModel.updateOne(
+      { userId },
+      {
+        $inc: { partnerEarningsCents: amountCents },
+        $setOnInsert: {
+          userId,
+          displayName: null,
+          nickname: null,
+          countryCode: null,
+          homeRegionId: null,
+          surfLevel: null,
+          avatarKey: null,
+        },
+      },
+      { session: mongoSession, upsert: true },
+    );
+  }
+
   async buyAndClaimWave(
     buyerUserId: string,
     jobId: string,
@@ -140,19 +247,33 @@ export class CommercialWaveService {
     discountPercent: number;
   }> {
     const ctx = await this.loadCommercialContext(jobId);
+    const partnerUserId = ctx.session.userId;
+    if (buyerUserId === partnerUserId) {
+      // Self-purchase has no economic meaning: the partner would burn spendable
+      // Peaks just to credit their own withdrawable earnings.
+      throw new BadRequestException(
+        "You can't buy and claim your own session's wave",
+      );
+    }
     const { totalPeaks: basePeaks, discountPercent } = computeBuyClaimPeaks(
       ctx.settings,
       quantity,
     );
-    const { totalPeaks } = computeCheckoutTotal(basePeaks);
+    const checkout = computeCheckoutTotal(basePeaks, this.checkoutOptions(ctx));
+    const { totalPeaks, communityFeePeaks } = checkout;
+    const partnerEarningsCents = this.partnerEarningsCents(basePeaks);
     const claimedAt = new Date().toISOString();
     const unlockedAt = claimedAt;
-    const sessionId = ctx.session.sessionId;
 
     const mongoSession = await this.connection.startSession();
     mongoSession.startTransaction();
     try {
       await this.debitPeaks(buyerUserId, totalPeaks, mongoSession);
+      await this.creditPartnerEarningsCents(
+        partnerUserId,
+        partnerEarningsCents,
+        mongoSession,
+      );
 
       await this.videoJobModel
         .updateOne(
@@ -173,16 +294,18 @@ export class CommercialWaveService {
 
       await this.waveUnlockPurchaseModel.create(
         [
-          {
+          this.buildPurchaseLedger(ctx, {
             jobId,
-            sessionId,
             buyerUserId,
             beneficiaryUserId: buyerUserId,
             type: 'buy_claim',
             peaksCharged: totalPeaks,
+            basePeaks,
+            partnerEarningsCents,
+            communityFeePeaks,
             discountPercent,
             createdAt: unlockedAt,
-          },
+          }),
         ],
         { session: mongoSession },
       );
@@ -235,20 +358,47 @@ export class CommercialWaveService {
       }
     }
 
-    const settings = contexts[0]!.settings;
-    const lineBreakdowns = allocateBuyClaimLineBreakdowns(settings, ids.length);
+    const ctx = contexts[0]!;
+    if (buyerUserId === ctx.session.userId) {
+      // Same self-purchase guard as buyAndClaimWave — see comment there.
+      throw new BadRequestException(
+        "You can't buy and claim your own session's waves",
+      );
+    }
+    const settings = ctx.settings;
+    const lineBreakdowns = allocateBuyClaimLineBreakdowns(
+      settings,
+      ids.length,
+      this.checkoutOptions(ctx),
+    );
     const { discountPercent } = computeBuyClaimPeaks(settings, ids.length);
     const peaksCharged = lineBreakdowns.reduce(
       (sum, line) => sum + line.totalPeaks,
       0,
     );
+    // Compute cents per line (floor each independently) so the ledger total
+    // matches what we credit to the partner — avoids a one-cent rounding
+    // discrepancy across many lines vs. computing once on the sum.
+    const partnerEarningsCentsPerLine = lineBreakdowns.map((line) =>
+      this.partnerEarningsCents(line.basePeaks),
+    );
+    const partnerEarningsCentsTotal = partnerEarningsCentsPerLine.reduce(
+      (sum, c) => sum + c,
+      0,
+    );
     const claimedAt = new Date().toISOString();
     const unlockedAt = claimedAt;
+    const partnerUserId = ctx.session.userId;
 
     const mongoSession = await this.connection.startSession();
     mongoSession.startTransaction();
     try {
       await this.debitPeaks(buyerUserId, peaksCharged, mongoSession);
+      await this.creditPartnerEarningsCents(
+        partnerUserId,
+        partnerEarningsCentsTotal,
+        mongoSession,
+      );
 
       for (let i = 0; i < ids.length; i += 1) {
         const jobId = ids[i]!;
@@ -275,16 +425,18 @@ export class CommercialWaveService {
 
         await this.waveUnlockPurchaseModel.create(
           [
-            {
+            this.buildPurchaseLedger(ctx, {
               jobId,
-              sessionId,
               buyerUserId,
               beneficiaryUserId: buyerUserId,
               type: 'buy_claim',
               peaksCharged: line.totalPeaks,
+              basePeaks: line.basePeaks,
+              partnerEarningsCents: partnerEarningsCentsPerLine[i]!,
+              communityFeePeaks: line.communityFeePeaks,
               discountPercent,
               createdAt: unlockedAt,
-            },
+            }),
           ],
           { session: mongoSession },
         );
@@ -321,6 +473,11 @@ export class CommercialWaveService {
     if (ctx.job.videoUnlockedForUserId?.trim()) {
       throw new ConflictException('This wave is already unlocked');
     }
+    if (sponsorUserId === ctx.session.userId) {
+      // The session's partner cannot sponsor their own wave — debit/credit
+      // would target the same account, see buyAndClaimWave for details.
+      throw new BadRequestException("You can't sponsor your own session's wave");
+    }
     const claimStatus = ctx.job.claimStatus ?? 'none';
     let beneficiary: string;
     let updateFilter: Record<string, unknown>;
@@ -351,14 +508,21 @@ export class CommercialWaveService {
       throw new BadRequestException('Wave cannot be sponsored in this state');
     }
     const sponsorBase = computeSponsorPeaks(ctx.settings, 1);
-    const { totalPeaks: peaksCharged } = computeCheckoutTotal(sponsorBase);
+    const checkout = computeCheckoutTotal(sponsorBase, this.checkoutOptions(ctx));
+    const { totalPeaks: peaksCharged, communityFeePeaks } = checkout;
+    const partnerEarningsCents = this.partnerEarningsCents(sponsorBase);
     const unlockedAt = new Date().toISOString();
-    const sessionId = ctx.session.sessionId;
+    const partnerUserId = ctx.session.userId;
 
     const mongoSession = await this.connection.startSession();
     mongoSession.startTransaction();
     try {
       await this.debitPeaks(sponsorUserId, peaksCharged, mongoSession);
+      await this.creditPartnerEarningsCents(
+        partnerUserId,
+        partnerEarningsCents,
+        mongoSession,
+      );
 
       const updated = await this.videoJobModel
         .findOneAndUpdate(
@@ -381,16 +545,18 @@ export class CommercialWaveService {
 
       await this.waveUnlockPurchaseModel.create(
         [
-          {
+          this.buildPurchaseLedger(ctx, {
             jobId,
-            sessionId,
             buyerUserId: sponsorUserId,
             beneficiaryUserId: beneficiary,
             type: 'sponsor',
             peaksCharged,
+            basePeaks: sponsorBase,
+            partnerEarningsCents,
+            communityFeePeaks,
             discountPercent: 0,
             createdAt: unlockedAt,
-          },
+          }),
         ],
         { session: mongoSession },
       );

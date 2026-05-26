@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -23,13 +24,83 @@ export class FeedController {
     @AuthUserId() userId: string,
     @Query('limit') limit?: string,
     @Query('cursor') cursor?: string,
+    @Query('countryCode') countryCode?: string,
+    @Query('regionId') regionId?: string,
+    @Query('regionIds') regionIds?: string,
+    @Query('spotIds') spotIds?: string,
   ) {
-    return this.feed.listDiscoverFeed(userId, { limit, cursor });
+    return this.feed.listDiscoverFeed(userId, {
+      limit,
+      cursor,
+      countryCode,
+      regionId,
+      regionIds,
+      spotIds,
+    });
   }
 
   @Get('feed/my-videos')
   listMyVideos(@AuthUserId() userId: string) {
     return this.feed.listMyVideos(userId);
+  }
+
+  @Get('feed/search/geo-suggest')
+  geoSuggest(
+    @Query('q') q?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.feed.geoSuggest(q, limit);
+  }
+
+  @Get('feed/search/session-dates')
+  searchSessionDates(
+    @Query('countryCode') countryCode?: string,
+    @Query('regionId') regionId?: string,
+    @Query('spotId') spotId?: string,
+    @Query('month') month?: string,
+  ) {
+    return this.feed.searchSessionDates({
+      countryCode,
+      regionId,
+      spotId,
+      month,
+    });
+  }
+
+  @Get('feed/search/sessions')
+  searchSessions(
+    @AuthUserId() userId: string,
+    @Query('countryCode') countryCode?: string,
+    @Query('regionId') regionId?: string,
+    @Query('spotId') spotId?: string,
+    @Query('sessionDate') sessionDate?: string,
+    @Query('limit') limit?: string,
+    @Query('cursor') cursor?: string,
+  ) {
+    return this.feed.searchSessions(userId, {
+      countryCode,
+      regionId,
+      spotId,
+      sessionDate,
+      limit,
+      cursor,
+    });
+  }
+
+  @Get('feed/latest-sessions')
+  latestSessions(
+    @AuthUserId() userId: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.feed.listLatestSessions(userId, limit);
+  }
+
+  @Get('feed/latest-waves')
+  latestWaves(
+    @AuthUserId() userId: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.feed.listLatestWaves(userId, limit);
   }
 
   @Post('discover/videos/:jobId/publish')
@@ -95,6 +166,24 @@ export class FeedController {
           }))
       : [];
     return this.feed.quoteUnlockCart(userId, items);
+  }
+
+  @Post('discover/videos/:jobId/shaka')
+  @HttpCode(HttpStatus.OK)
+  shakaVideo(
+    @AuthUserId() userId: string,
+    @Param('jobId') jobId: string,
+  ) {
+    return this.feed.shakaVideo(userId, jobId);
+  }
+
+  @Delete('discover/videos/:jobId/shaka')
+  @HttpCode(HttpStatus.OK)
+  unshakaVideo(
+    @AuthUserId() userId: string,
+    @Param('jobId') jobId: string,
+  ) {
+    return this.feed.unshakaVideo(userId, jobId);
   }
 
   @Post('discover/cart/buy-claim-batch')

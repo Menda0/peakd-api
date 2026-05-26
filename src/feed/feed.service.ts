@@ -9,9 +9,11 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, PipelineStage } from 'mongoose';
 import { S3Service } from '../s3/s3.service';
 import {
+  isSessionLocationUndisclosed,
   isUndisclosedRegionId,
   isUndisclosedSpotId,
 } from '../studio/geo-undisclosed';
+import type { CheckoutOptions } from '../commercial/commercial-pricing';
 import { Region } from '../studio/schemas/region.schema';
 import { Spot } from '../studio/schemas/spot.schema';
 import { SurfSession } from '../studio/schemas/surf-session.schema';
@@ -31,16 +33,107 @@ import type { CommercialSettings } from '../commercial/commercial-settings.types
 import { VideoJob } from '../video/schemas/video-job.schema';
 import type { VideoJobStatus } from '../video/schemas/video-job.schema';
 import type { VideoClaimStatus } from '../video/schemas/video-job.schema';
+import { VideoShaka } from './schemas/video-shaka.schema';
 import {
   buildCursorMatchFilter,
   decodeDiscoverCursor,
+  decodeSearchSessionsCursor,
   encodeDiscoverCursor,
+  encodeSearchSessionsCursor,
+  searchSessionsCursorKey,
+  type SearchSessionsCursor,
   type DiscoverCursor,
 } from './discover-ranking';
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
 const SNAPSHOT_URL_MAX = 4;
+const DEFAULT_GEO_SUGGEST_LIMIT = 12;
+const MAX_GEO_SUGGEST_LIMIT = 24;
+const SEARCH_PREVIEW_THUMBS = 3;
+const COUNTRY_CODE = /^[A-Z]{2}$/;
+const SESSION_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const MONTH_YM = /^\d{4}-\d{2}$/;
+const UNDISCLOSED_REGION_PREFIX = 'undisclosed:region:';
+const UNDISCLOSED_SPOT_PREFIX = 'undisclosed:spot:';
+
+export interface GeoSuggestItemDto {
+  type: 'country' | 'region' | 'spot';
+  countryCode: string;
+  regionId?: string;
+  spotId?: string;
+  label: string;
+  name: string;
+  verified: boolean;
+}
+
+export interface SearchSessionAuthorDto {
+  userId: string;
+  displayName: string | null;
+  avatarUrl: string | null;
+  isPartner: boolean;
+  partnerType: 'videographer' | 'coach' | 'other' | null;
+}
+
+export interface SearchSessionSurferDto {
+  userId: string;
+  displayName: string | null;
+  avatarUrl: string | null;
+}
+
+export interface SearchSessionDto {
+  sessionId: string;
+  shareToken: string | null;
+  isCommercial: boolean;
+  countryCode: string;
+  regionId: string;
+  spotId: string;
+  sessionDate: string;
+  sessionTime: string;
+  durationMinutes: number;
+  conditionsRating: number | null;
+  waveTypes: string[];
+  regionName: string;
+  spotName: string | null;
+  author: SearchSessionAuthorDto;
+  surfers: SearchSessionSurferDto[];
+  videoCount: number;
+  previewThumbnailUrls: string[];
+}
+
+export interface SearchSessionsPageDto {
+  sessions: SearchSessionDto[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
+const SEARCH_SESSIONS_DEFAULT_LIMIT = 10;
+const SEARCH_SESSIONS_MAX_LIMIT = 50;
+const LATEST_SESSIONS_DEFAULT_LIMIT = 5;
+const LATEST_SESSIONS_MAX_LIMIT = 20;
+const LATEST_WAVES_DEFAULT_LIMIT = 4;
+const LATEST_WAVES_MAX_LIMIT = 20;
+
+export interface LatestWaveLocationDto {
+  countryCode: string;
+  regionName: string;
+  spotName: string | null;
+  isUndisclosed: boolean;
+}
+
+export interface LatestWaveDto {
+  jobId: string;
+  sessionId: string;
+  shareToken: string | null;
+  claimStatus: 'auto' | 'claimed';
+  claimedAt: string;
+  thumbnailUrl: string | null;
+  isCommercial: boolean;
+  surfer: SurferProfileDto | null;
+  location: LatestWaveLocationDto;
+  sessionDate: string;
+  sessionTime: string;
+}
 
 export interface DiscoverFeedAuthorDto {
   userId: string;
@@ -74,6 +167,7 @@ export interface DiscoverFeedItemDto {
   location: DiscoverFeedLocationDto;
   session: DiscoverFeedSessionDto;
   shakaCount: number;
+  shakaedByViewer: boolean;
   followedByViewer: boolean;
   claimStatus: VideoClaimStatus;
   uploadSource: 'studio' | 'personal';
@@ -253,10 +347,100 @@ export class FeedService {
     private readonly regionModel: Model<Region>,
     @InjectModel(Spot.name)
     private readonly spotModel: Model<Spot>,
+    @InjectModel(VideoShaka.name)
+    private readonly videoShakaModel: Model<VideoShaka>,
     private readonly s3: S3Service,
     private readonly config: ConfigService,
     private readonly commercialWave: CommercialWaveService,
   ) {}
+
+  private async getShakaInfo(
+    jobIds: string[],
+    viewerUserId: string,
+  ): Promise<Map<string, { count: number; viewerShaka: boolean }>> {
+    const result = new Map<string, { count: number; viewerShaka: boolean }>();
+    const ids = Array.from(new Set(jobIds.filter((id) => id?.trim())));
+    if (ids.length === 0) return result;
+    for (const id of ids) {
+      result.set(id, { count: 0, viewerShaka: false });
+    }
+    const [counts, viewerRows] = await Promise.all([
+      this.videoShakaModel
+        .aggregate<{ _id: string; count: number }>([
+          { $match: { jobId: { $in: ids } } },
+          { $group: { _id: '$jobId', count: { $sum: 1 } } },
+        ])
+        .exec(),
+      this.videoShakaModel
+        .find({ jobId: { $in: ids }, userId: viewerUserId })
+        .lean()
+        .exec(),
+    ]);
+    for (const row of counts) {
+      const entry = result.get(row._id);
+      if (entry) entry.count = row.count;
+    }
+    for (const row of viewerRows) {
+      const entry = result.get(row.jobId);
+      if (entry) entry.viewerShaka = true;
+    }
+    return result;
+  }
+
+  private shakaInfoFor(
+    map: Map<string, { count: number; viewerShaka: boolean }> | null,
+    jobId: string,
+  ): { count: number; viewerShaka: boolean } {
+    return map?.get(jobId) ?? { count: 0, viewerShaka: false };
+  }
+
+  async shakaVideo(
+    userId: string,
+    jobId: string,
+  ): Promise<{ shakaCount: number; shakaedByViewer: boolean }> {
+    const trimmedJobId = jobId?.trim();
+    if (!trimmedJobId) {
+      throw new BadRequestException('jobId is required');
+    }
+    const job = await this.videoJobModel
+      .findOne({ jobId: trimmedJobId })
+      .lean()
+      .exec();
+    if (!job) {
+      throw new NotFoundException('Video not found');
+    }
+    try {
+      await this.videoShakaModel.create({
+        jobId: trimmedJobId,
+        userId,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      const code = (err as { code?: number } | null)?.code;
+      if (code !== 11000) throw err;
+    }
+    const count = await this.videoShakaModel
+      .countDocuments({ jobId: trimmedJobId })
+      .exec();
+    return { shakaCount: count, shakaedByViewer: true };
+  }
+
+  async unshakaVideo(
+    userId: string,
+    jobId: string,
+  ): Promise<{ shakaCount: number; shakaedByViewer: boolean }> {
+    const trimmedJobId = jobId?.trim();
+    if (!trimmedJobId) {
+      throw new BadRequestException('jobId is required');
+    }
+    await this.videoShakaModel
+      .deleteOne({ jobId: trimmedJobId, userId })
+      .exec();
+    const count = await this.videoShakaModel
+      .countDocuments({ jobId: trimmedJobId })
+      .exec();
+    return { shakaCount: count, shakaedByViewer: false };
+  }
 
   private parseLimit(raw: string | undefined): number {
     if (!raw?.trim()) return DEFAULT_LIMIT;
@@ -295,11 +479,28 @@ export class FeedService {
     return urls;
   }
 
+  private checkoutOptionsForSession(session: {
+    countryCode: string;
+    regionId: string;
+    spotId: string;
+  }): CheckoutOptions {
+    return {
+      waiveCommunityFee: isSessionLocationUndisclosed(
+        session.countryCode,
+        session.regionId,
+        session.spotId,
+      ),
+    };
+  }
+
   private commercialExtras(
     session: {
       isCommercial?: boolean;
       commercialSettings?: unknown;
       userId: string;
+      countryCode: string;
+      regionId: string;
+      spotId: string;
     },
     partner: { commercialSettings?: unknown } | null,
     job: {
@@ -345,19 +546,29 @@ export class FeedService {
     const unlockedFor = job.videoUnlockedForUserId?.trim() || null;
     const claimedBy = job.claimedByUserId?.trim() || null;
     const videoUnlockedByViewer = unlockedFor === viewerUserId;
+    const checkoutOpts = this.checkoutOptionsForSession(session);
     const wavePricePeaks = settings?.videoPricePeaks ?? null;
     const buyClaimPricePeaks = settings
-      ? computeCheckoutTotal(computeBuyClaimPeaks(settings, 1).totalPeaks).totalPeaks
+      ? computeCheckoutTotal(
+          computeBuyClaimPeaks(settings, 1).totalPeaks,
+          checkoutOpts,
+        ).totalPeaks
       : null;
     const sponsorPricePeaks = settings
-      ? computeCheckoutTotal(computeSponsorPeaks(settings, 1)).totalPeaks
+      ? computeCheckoutTotal(computeSponsorPeaks(settings, 1), checkoutOpts).totalPeaks
       : null;
+    // The session owner (partner) can't buy or sponsor their own wave: the
+    // backend rejects it because debit and credit would hit the same account
+    // and effectively make the purchase free (and not change their balance).
+    const viewerIsPartner = session.userId === viewerUserId;
     const canClaim =
-      claimStatus === 'none' && !unlockedFor;
-    const canBuyClaim = Boolean(settings && buyClaimPricePeaks != null);
+      claimStatus === 'none' && !unlockedFor && !viewerIsPartner;
+    const canBuyClaim =
+      Boolean(settings && buyClaimPricePeaks != null) && !viewerIsPartner;
     const canSponsor =
       Boolean(settings) &&
       !unlockedFor &&
+      !viewerIsPartner &&
       (claimStatus !== 'claimed' ||
         (Boolean(claimedBy) && claimedBy !== viewerUserId));
     return {
@@ -489,12 +700,16 @@ export class FeedService {
     const buyClaimBySession = new Map<string, Loaded[]>();
 
     for (const row of loaded) {
+      const checkoutOpts: CheckoutOptions = {
+        waiveCommunityFee: row.sessionMeta.isUndisclosed,
+      };
       if (row.intent === 'sponsor') {
         const sponsorBase = computeSponsorPeaks(row.ctx.settings, 1);
         const priced = checkoutBreakdownWithDiscount(
           sponsorBase,
           row.ctx.settings.videoPricePeaks,
           0,
+          checkoutOpts,
         );
         lines.push({
           jobId: row.jobId,
@@ -522,7 +737,14 @@ export class FeedService {
     for (const [, group] of buyClaimBySession) {
       group.sort((a, b) => a.jobId.localeCompare(b.jobId));
       const settings = group[0]!.ctx.settings;
-      const pricedLines = allocateBuyClaimLineBreakdowns(settings, group.length);
+      const checkoutOpts: CheckoutOptions = {
+        waiveCommunityFee: group[0]!.sessionMeta.isUndisclosed,
+      };
+      const pricedLines = allocateBuyClaimLineBreakdowns(
+        settings,
+        group.length,
+        checkoutOpts,
+      );
       for (let i = 0; i < group.length; i += 1) {
         const row = group[i]!;
         const priced = pricedLines[i]!;
@@ -633,23 +855,27 @@ export class FeedService {
       doc,
       viewerUserId,
     );
+    const countryCode = session.countryCode;
+    const isUndisclosed = isSessionLocationUndisclosed(
+      countryCode,
+      session.regionId,
+      session.spotId,
+    );
+    const checkoutOpts: CheckoutOptions = { waiveCommunityFee: isUndisclosed };
     const buyClaimPriced = computeBuyClaimPeaks(settings, 1);
     const sponsorBase = computeSponsorPeaks(settings, 1);
     const buyClaim = checkoutBreakdownWithDiscount(
       buyClaimPriced.totalPeaks,
       settings.videoPricePeaks,
       buyClaimPriced.discountPercent,
+      checkoutOpts,
     );
     const sponsor = checkoutBreakdownWithDiscount(
       sponsorBase,
       settings.videoPricePeaks,
       0,
+      checkoutOpts,
     );
-
-    const countryCode = session.countryCode;
-    const isUndisclosed =
-      isUndisclosedRegionId(session.regionId, countryCode) ||
-      isUndisclosedSpotId(session.spotId, countryCode);
     const regionName =
       region?.name?.trim() ||
       (isUndisclosedRegionId(session.regionId, countryCode) ? 'Undisclosed' : 'Unknown');
@@ -692,10 +918,10 @@ export class FeedService {
         canBuyClaim: rowExtras.canBuyClaim,
         canSponsor: rowExtras.canSponsor,
         buyClaimTotalPeaks: rowExtras.canBuyClaim
-          ? computeCheckoutTotal(rowBuyBase).totalPeaks
+          ? computeCheckoutTotal(rowBuyBase, checkoutOpts).totalPeaks
           : null,
         sponsorTotalPeaks: rowExtras.canSponsor
-          ? computeCheckoutTotal(rowSponsorBase).totalPeaks
+          ? computeCheckoutTotal(rowSponsorBase, checkoutOpts).totalPeaks
           : null,
       });
     }
@@ -873,6 +1099,21 @@ export class FeedService {
     return null;
   }
 
+  private async resolveDiscoverPlaybackUrl(
+    processedKey: string | null | undefined,
+    status: VideoJobStatus,
+    isCommercial: boolean,
+    videoUnlockedByViewer: boolean,
+  ): Promise<string | null> {
+    if (status !== 'completed' || !processedKey?.trim()) {
+      return null;
+    }
+    if (isCommercial && !videoUnlockedByViewer) {
+      return null;
+    }
+    return this.s3.presignedGetUrl(processedKey);
+  }
+
   private async resolveFeedSurfer(doc: {
     userId: string;
     claimStatus?: VideoClaimStatus;
@@ -949,9 +1190,15 @@ export class FeedService {
       .lean()
       .exec();
 
+    const shakaInfo = await this.getShakaInfo(
+      rows.map((r) => r.jobId),
+      viewerUserId,
+    );
     const items: DiscoverFeedItemDto[] = [];
     for (const doc of rows) {
-      items.push(await this.docToDiscoverDto(doc, 'processing', viewerUserId));
+      items.push(
+        await this.docToDiscoverDto(doc, 'processing', viewerUserId, shakaInfo),
+      );
     }
     return items;
   }
@@ -983,12 +1230,17 @@ export class FeedService {
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
     );
 
+    const shakaInfo = await this.getShakaInfo(
+      sorted.map((d) => d.jobId),
+      userId,
+    );
     const items: MyVideoItemDto[] = [];
     for (const doc of sorted) {
       const dto = await this.docToDiscoverDto(
         doc,
         this.normalizeStatus(doc),
         userId,
+        shakaInfo,
       );
       const isViewerSurfer =
         (doc.uploadSource === 'personal' && doc.claimStatus === 'auto') ||
@@ -1014,7 +1266,7 @@ export class FeedService {
         claimStatus: dto.claimStatus,
         discoverPublishedAt: doc.discoverPublishedAt ?? null,
         uploadSource: doc.uploadSource === 'personal' ? 'personal' : 'studio',
-        surfer: isViewerSurfer ? surfer : null,
+        surfer: dto.surfer ?? (isViewerSurfer ? surfer : null),
         filmedBy,
         isCommercial: dto.isCommercial,
         snapshotUrls: dto.snapshotUrls,
@@ -1028,7 +1280,14 @@ export class FeedService {
 
   async listDiscoverFeed(
     viewerUserId: string,
-    options: { limit?: string; cursor?: string },
+    options: {
+      limit?: string;
+      cursor?: string;
+      countryCode?: string;
+      regionId?: string;
+      regionIds?: string;
+      spotIds?: string;
+    },
   ): Promise<DiscoverFeedPageDto> {
     const limit = this.parseLimit(options.limit);
     const cursorRaw = options.cursor?.trim();
@@ -1039,6 +1298,38 @@ export class FeedService {
         throw new BadRequestException('Invalid cursor');
       }
     }
+
+    const countryFilter = options.countryCode?.trim().toUpperCase();
+    const regionFilterMulti = options.regionIds
+      ? options.regionIds
+          .split(',')
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0)
+      : [];
+    const regionFilterSingle = options.regionId?.trim();
+    const regionFilter =
+      regionFilterMulti.length > 0
+        ? regionFilterMulti
+        : regionFilterSingle
+          ? [regionFilterSingle]
+          : [];
+    const spotFilter = options.spotIds
+      ? options.spotIds
+          .split(',')
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0)
+      : [];
+    if (countryFilter && !COUNTRY_CODE.test(countryFilter)) {
+      throw new BadRequestException('Invalid countryCode');
+    }
+    if (regionFilter.length > 0 && !countryFilter) {
+      throw new BadRequestException(
+        'countryCode is required when filtering by region',
+      );
+    }
+    const hasGeoFilter = Boolean(
+      countryFilter || regionFilter.length > 0 || spotFilter.length > 0,
+    );
 
     const pipeline: PipelineStage[] = [
       {
@@ -1111,6 +1402,20 @@ export class FeedService {
       },
     ];
 
+    if (hasGeoFilter) {
+      const geoMatch: Record<string, unknown> = {};
+      if (countryFilter) geoMatch['session.countryCode'] = countryFilter;
+      if (regionFilter.length > 0) {
+        geoMatch['session.regionId'] =
+          regionFilter.length === 1 ? regionFilter[0] : { $in: regionFilter };
+      }
+      if (spotFilter.length > 0) {
+        geoMatch['session.spotId'] =
+          spotFilter.length === 1 ? spotFilter[0] : { $in: spotFilter };
+      }
+      pipeline.push({ $match: geoMatch } as PipelineStage);
+    }
+
     if (cursor) {
       pipeline.push({
         $match: buildCursorMatchFilter(cursor),
@@ -1129,15 +1434,19 @@ export class FeedService {
     const hasMore = rows.length > limit;
     const pageRows = hasMore ? rows.slice(0, limit) : rows;
 
+    const shakaInfo = await this.getShakaInfo(
+      pageRows.map((r) => r.jobId),
+      viewerUserId,
+    );
     const discoverItems: DiscoverFeedItemDto[] = [];
     for (const row of pageRows) {
-      discoverItems.push(await this.rowToDto(row, viewerUserId));
+      discoverItems.push(await this.rowToDto(row, viewerUserId, shakaInfo));
     }
 
     let items = discoverItems;
     let mergedHasMore = hasMore;
 
-    if (cursor === null) {
+    if (cursor === null && !hasGeoFilter) {
       const pending = await this.listViewerProcessingPersonal(viewerUserId);
       const merged = [...pending, ...discoverItems].sort((a, b) => {
         const t = b.createdAt.localeCompare(a.createdAt);
@@ -1219,6 +1528,7 @@ export class FeedService {
     },
     status: VideoJobStatus,
     viewerUserId: string,
+    shakaInfoMap?: Map<string, { count: number; viewerShaka: boolean }> | null,
   ): Promise<DiscoverFeedItemDto> {
     const sessionId = doc.surfSessionId?.trim();
     if (!sessionId) {
@@ -1257,14 +1567,16 @@ export class FeedService {
     );
     extras.snapshotUrls = snapshotUrls;
 
-    let videoUrl: string | null = null;
+    const videoUrl = await this.resolveDiscoverPlaybackUrl(
+      doc.processedKey,
+      status,
+      isCommercial,
+      extras.videoUnlockedByViewer,
+    );
     let thumbnailUrl: string | null = null;
-    if (status === 'completed' && doc.processedKey && !isCommercial) {
-      videoUrl = await this.s3.presignedGetUrl(doc.processedKey);
-      const snapKey = doc.snapshotKeys?.[0];
-      if (snapKey) {
-        thumbnailUrl = await this.s3.presignedGetUrl(snapKey);
-      }
+    const snapKey = doc.snapshotKeys?.[0];
+    if (snapKey) {
+      thumbnailUrl = await this.s3.presignedGetUrl(snapKey);
     } else if (snapshotUrls[0]) {
       thumbnailUrl = snapshotUrls[0];
     }
@@ -1278,6 +1590,12 @@ export class FeedService {
       ),
       this.resolveFeedSurfer(doc),
     ]);
+
+    const shakaInfo = shakaInfoMap
+      ? this.shakaInfoFor(shakaInfoMap, doc.jobId)
+      : await this.getShakaInfo([doc.jobId], viewerUserId).then((m) =>
+          this.shakaInfoFor(m, doc.jobId),
+        );
 
     return {
       jobId: doc.jobId,
@@ -1293,7 +1611,8 @@ export class FeedService {
         isUndisclosed,
       },
       session: this.sessionToDto(session),
-      shakaCount: 0,
+      shakaCount: shakaInfo.count,
+      shakaedByViewer: shakaInfo.viewerShaka,
       followedByViewer: false,
       claimStatus: doc.claimStatus ?? 'none',
       uploadSource: doc.uploadSource === 'personal' ? 'personal' : 'studio',
@@ -1307,6 +1626,7 @@ export class FeedService {
   private async rowToDto(
     row: AggregatedRow,
     viewerUserId: string,
+    shakaInfoMap?: Map<string, { count: number; viewerShaka: boolean }> | null,
   ): Promise<DiscoverFeedItemDto> {
     const session = row.session;
     const countryCode = session.countryCode;
@@ -1337,14 +1657,17 @@ export class FeedService {
     );
     extras.snapshotUrls = snapshotUrls;
 
-    let videoUrl: string | null = null;
+    const status = this.normalizeStatus(row);
+    const videoUrl = await this.resolveDiscoverPlaybackUrl(
+      row.processedKey,
+      status,
+      isCommercial,
+      extras.videoUnlockedByViewer,
+    );
     let thumbnailUrl: string | null = null;
-    if (!isCommercial && row.processedKey) {
-      videoUrl = await this.s3.presignedGetUrl(row.processedKey);
-      const snapKey = row.snapshotKeys?.[0];
-      if (snapKey) {
-        thumbnailUrl = await this.s3.presignedGetUrl(snapKey);
-      }
+    const snapKey = row.snapshotKeys?.[0];
+    if (snapKey) {
+      thumbnailUrl = await this.s3.presignedGetUrl(snapKey);
     } else if (snapshotUrls[0]) {
       thumbnailUrl = snapshotUrls[0];
     }
@@ -1359,10 +1682,16 @@ export class FeedService {
       this.resolveFeedSurfer(row),
     ]);
 
+    const shakaInfo = shakaInfoMap
+      ? this.shakaInfoFor(shakaInfoMap, row.jobId)
+      : await this.getShakaInfo([row.jobId], viewerUserId).then((m) =>
+          this.shakaInfoFor(m, row.jobId),
+        );
+
     return {
       jobId: row.jobId,
       createdAt: row.createdAt,
-      status: this.normalizeStatus(row),
+      status,
       videoUrl,
       thumbnailUrl,
       author,
@@ -1373,7 +1702,8 @@ export class FeedService {
         isUndisclosed,
       },
       session: this.sessionToDto(session),
-      shakaCount: 0,
+      shakaCount: shakaInfo.count,
+      shakaedByViewer: shakaInfo.viewerShaka,
       followedByViewer: false,
       claimStatus: row.claimStatus ?? 'none',
       uploadSource: row.uploadSource === 'personal' ? 'personal' : 'studio',
@@ -1381,6 +1711,719 @@ export class FeedService {
       isOwnUpload: row.userId === viewerUserId,
       surfer,
       ...extras,
+    };
+  }
+
+  private parseGeoSuggestLimit(raw: string | undefined): number {
+    if (!raw?.trim()) return DEFAULT_GEO_SUGGEST_LIMIT;
+    const n = Number.parseInt(raw, 10);
+    if (!Number.isFinite(n) || n < 1) return DEFAULT_GEO_SUGGEST_LIMIT;
+    return Math.min(n, MAX_GEO_SUGGEST_LIMIT);
+  }
+
+  private escapeRegex(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  private normalizeCountryCode(code: string): string {
+    const c = code.trim().toUpperCase();
+    if (!COUNTRY_CODE.test(c)) {
+      throw new BadRequestException('Invalid countryCode');
+    }
+    return c;
+  }
+
+  private normalizeSessionDate(value: string): string {
+    const d = value.trim();
+    if (!SESSION_DATE.test(d)) {
+      throw new BadRequestException('Invalid sessionDate');
+    }
+    return d;
+  }
+
+  private normalizeMonthYm(value: string): string {
+    const m = value.trim();
+    if (!MONTH_YM.test(m)) {
+      throw new BadRequestException('Invalid month');
+    }
+    const [, mon] = m.split('-');
+    const monthNum = Number.parseInt(mon!, 10);
+    if (monthNum < 1 || monthNum > 12) {
+      throw new BadRequestException('Invalid month');
+    }
+    return m;
+  }
+
+  private monthDateRange(month: string): { from: string; to: string } {
+    const [yearStr, monStr] = month.split('-');
+    const year = Number.parseInt(yearStr!, 10);
+    const monthNum = Number.parseInt(monStr!, 10);
+    const lastDay = new Date(year, monthNum, 0).getDate();
+    return {
+      from: `${month}-01`,
+      to: `${month}-${String(lastDay).padStart(2, '0')}`,
+    };
+  }
+
+  private discoverJobsWithSessionStages(): PipelineStage[] {
+    return [
+      {
+        $match: {
+          discoverPublishedAt: { $ne: null },
+          status: 'completed',
+          processedKey: { $exists: true, $ne: null },
+          surfSessionId: { $ne: null },
+        },
+      },
+      {
+        $lookup: {
+          from: 'surf_sessions',
+          localField: 'surfSessionId',
+          foreignField: 'sessionId',
+          as: 'session',
+        },
+      },
+      { $unwind: { path: '$session', preserveNullAndEmptyArrays: false } },
+      // Join the session's region so country filters can fall back on the
+      // canonical region.countryCode if the denormalized session.countryCode
+      // is missing or has inconsistent casing in legacy data.
+      {
+        $lookup: {
+          from: 'regions',
+          localField: 'session.regionId',
+          foreignField: 'regionId',
+          as: 'region',
+        },
+      },
+      {
+        $unwind: { path: '$region', preserveNullAndEmptyArrays: true },
+      },
+    ];
+  }
+
+  private buildSessionGeoMatchNoDate(
+    countryCode: string,
+    regionId?: string,
+    spotId?: string,
+  ): Record<string, unknown> {
+    const cc = countryCode.trim().toUpperCase();
+    const ccRegex = new RegExp(`^${this.escapeRegex(cc)}$`, 'i');
+    const match: Record<string, unknown> = {
+      'session.status': 'closed',
+      $or: [
+        { 'session.countryCode': ccRegex },
+        { 'region.countryCode': ccRegex },
+      ],
+    };
+    if (regionId?.trim()) match['session.regionId'] = regionId.trim();
+    if (spotId?.trim()) match['session.spotId'] = spotId.trim();
+    return match;
+  }
+
+  private parseSearchSessionsLimit(raw: string | undefined): number {
+    if (!raw?.trim()) return SEARCH_SESSIONS_DEFAULT_LIMIT;
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new BadRequestException('Invalid limit');
+    }
+    return Math.min(parsed, SEARCH_SESSIONS_MAX_LIMIT);
+  }
+
+  private buildSessionGeoMatch(
+    countryCode: string,
+    sessionDate: string | { from: string; to: string },
+    regionId?: string,
+    spotId?: string,
+  ): Record<string, unknown> {
+    const cc = countryCode.trim().toUpperCase();
+    const ccRegex = new RegExp(`^${this.escapeRegex(cc)}$`, 'i');
+    // Match either the session's stored countryCode or the joined region's
+    // countryCode (case-insensitive) so legacy/inconsistent data still surfaces.
+    // Only published sessions (status === 'closed') are returned: open
+    // sessions are still being filled by the partner and should not be
+    // surfaced in search results.
+    const match: Record<string, unknown> = {
+      'session.status': 'closed',
+      $or: [
+        { 'session.countryCode': ccRegex },
+        { 'region.countryCode': ccRegex },
+      ],
+    };
+    if (typeof sessionDate === 'string') {
+      match['session.sessionDate'] = sessionDate;
+    } else {
+      match['session.sessionDate'] = {
+        $gte: sessionDate.from,
+        $lte: sessionDate.to,
+      };
+    }
+    if (regionId?.trim()) {
+      match['session.regionId'] = regionId.trim();
+    }
+    if (spotId?.trim()) {
+      match['session.spotId'] = spotId.trim();
+    }
+    return match;
+  }
+
+  async geoSuggest(
+    q: string | undefined,
+    limitRaw: string | undefined,
+  ): Promise<{ items: GeoSuggestItemDto[] }> {
+    const query = q?.trim() ?? '';
+    if (!query) {
+      throw new BadRequestException('q is required');
+    }
+    const limit = this.parseGeoSuggestLimit(limitRaw);
+    const regex = new RegExp(this.escapeRegex(query), 'i');
+    const regionCap = Math.ceil(limit / 2);
+    const spotCap = Math.floor(limit / 2);
+
+    const [regions, spotRows] = await Promise.all([
+      this.regionModel
+        .find({
+          verified: true,
+          disabled: { $ne: true },
+          name: regex,
+          regionId: { $not: new RegExp(`^${UNDISCLOSED_REGION_PREFIX}`) },
+        })
+        .sort({ name: 1 })
+        .limit(regionCap)
+        .lean()
+        .exec(),
+      this.spotModel
+        .aggregate([
+          {
+            $match: {
+              verified: true,
+              disabled: { $ne: true },
+              name: regex,
+              spotId: { $not: new RegExp(`^${UNDISCLOSED_SPOT_PREFIX}`) },
+            },
+          },
+          {
+            $lookup: {
+              from: 'regions',
+              localField: 'regionId',
+              foreignField: 'regionId',
+              as: 'region',
+            },
+          },
+          { $unwind: { path: '$region', preserveNullAndEmptyArrays: false } },
+          {
+            $match: {
+              'region.disabled': { $ne: true },
+              'region.regionId': {
+                $not: new RegExp(`^${UNDISCLOSED_REGION_PREFIX}`),
+              },
+            },
+          },
+          { $sort: { name: 1 } },
+          { $limit: spotCap },
+        ])
+        .exec(),
+    ]);
+
+    const items: GeoSuggestItemDto[] = [];
+
+    for (const region of regions) {
+      const cc = region.countryCode.trim().toUpperCase();
+      items.push({
+        type: 'region',
+        countryCode: cc,
+        regionId: region.regionId,
+        label: `${region.name.trim()} · ${cc}`,
+        name: region.name.trim(),
+        verified: true,
+      });
+    }
+
+    for (const row of spotRows as Array<{
+      spotId: string;
+      regionId: string;
+      name: string;
+      region: { countryCode: string; name: string };
+    }>) {
+      const cc = row.region.countryCode.trim().toUpperCase();
+      const regionName = row.region.name.trim();
+      items.push({
+        type: 'spot',
+        countryCode: cc,
+        regionId: row.regionId,
+        spotId: row.spotId,
+        label: `${row.name.trim()} · ${regionName} · ${cc}`,
+        name: row.name.trim(),
+        verified: true,
+      });
+    }
+
+    items.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+
+    return { items: items.slice(0, limit) };
+  }
+
+  async searchSessionDates(options: {
+    countryCode?: string;
+    regionId?: string;
+    spotId?: string;
+    month?: string;
+  }): Promise<{ dates: string[] }> {
+    if (!options.countryCode?.trim()) {
+      throw new BadRequestException('countryCode is required');
+    }
+    if (!options.month?.trim()) {
+      throw new BadRequestException('month is required');
+    }
+    const countryCode = this.normalizeCountryCode(options.countryCode);
+    const month = this.normalizeMonthYm(options.month);
+    const { from, to } = this.monthDateRange(month);
+
+    const pipeline: PipelineStage[] = [
+      ...this.discoverJobsWithSessionStages(),
+      {
+        $match: this.buildSessionGeoMatch(
+          countryCode,
+          { from, to },
+          options.regionId,
+          options.spotId,
+        ),
+      },
+      { $group: { _id: '$session.sessionDate' } },
+      { $sort: { _id: 1 } },
+    ];
+
+    const rows = (await this.videoJobModel.aggregate(pipeline).exec()) as Array<{
+      _id: string;
+    }>;
+
+    return { dates: rows.map((r) => r._id).filter(Boolean) };
+  }
+
+  async searchSessions(
+    _viewerUserId: string,
+    options: {
+      countryCode?: string;
+      regionId?: string;
+      spotId?: string;
+      sessionDate?: string;
+      limit?: string;
+      cursor?: string;
+    },
+  ): Promise<SearchSessionsPageDto> {
+    if (!options.countryCode?.trim()) {
+      throw new BadRequestException('countryCode is required');
+    }
+    const countryCode = this.normalizeCountryCode(options.countryCode);
+    const sessionDate = options.sessionDate?.trim()
+      ? this.normalizeSessionDate(options.sessionDate)
+      : null;
+    const limit = this.parseSearchSessionsLimit(options.limit);
+
+    let cursor: SearchSessionsCursor | null = null;
+    if (options.cursor?.trim()) {
+      cursor = decodeSearchSessionsCursor(options.cursor.trim());
+      if (!cursor) {
+        throw new BadRequestException('Invalid cursor');
+      }
+    }
+
+    const match = sessionDate
+      ? this.buildSessionGeoMatch(
+          countryCode,
+          sessionDate,
+          options.regionId,
+          options.spotId,
+        )
+      : this.buildSessionGeoMatchNoDate(
+          countryCode,
+          options.regionId,
+          options.spotId,
+        );
+
+    const postGroupStages: PipelineStage[] = [
+      {
+        $addFields: {
+          __sortKey: {
+            $concat: [
+              { $ifNull: ['$session.sessionDate', ''] },
+              'T',
+              {
+                $ifNull: [{ $ifNull: ['$session.sessionTime', null] }, '12:00'],
+              },
+              '#',
+              '$_id',
+            ],
+          },
+        },
+      },
+      { $sort: { __sortKey: -1 } },
+    ];
+
+    if (cursor) {
+      postGroupStages.push({
+        $match: { __sortKey: { $lt: searchSessionsCursorKey(cursor) } },
+      });
+    }
+
+    postGroupStages.push({ $limit: limit + 1 });
+
+    const pipeline: PipelineStage[] = [
+      ...this.discoverJobsWithSessionStages(),
+      { $match: match },
+      { $sort: { createdAt: -1 } },
+      {
+        $group: {
+          _id: '$session.sessionId',
+          session: { $first: '$session' },
+          snapshotKeys: {
+            $push: { $arrayElemAt: ['$snapshotKeys', 0] },
+          },
+          claimedSurferIds: {
+            $addToSet: {
+              $cond: [
+                { $eq: ['$claimStatus', 'claimed'] },
+                '$claimedByUserId',
+                null,
+              ],
+            },
+          },
+          videoCount: { $sum: 1 },
+        },
+      },
+      ...postGroupStages,
+    ];
+
+    const rows = (await this.videoJobModel.aggregate(pipeline).exec()) as Array<{
+      _id: string;
+      session: SurfSession;
+      snapshotKeys: (string | null | undefined)[];
+      claimedSurferIds: (string | null | undefined)[];
+      videoCount: number;
+    }>;
+
+    const hasMore = rows.length > limit;
+    const pageRows = hasMore ? rows.slice(0, limit) : rows;
+
+    const sessions: SearchSessionDto[] = [];
+    for (const row of pageRows) {
+      sessions.push(await this.enrichSearchSessionRow(row));
+    }
+
+    const last = pageRows[pageRows.length - 1];
+    const nextCursor =
+      hasMore && last
+        ? encodeSearchSessionsCursor({
+            sessionDate: last.session.sessionDate,
+            sessionTime: last.session.sessionTime?.trim() || '12:00',
+            sessionId: last._id,
+          })
+        : null;
+
+    return { sessions, nextCursor, hasMore };
+  }
+
+  async listLatestSessions(
+    _viewerUserId: string,
+    rawLimit?: string,
+  ): Promise<{ sessions: SearchSessionDto[] }> {
+    const limit = this.parseLatestSessionsLimit(rawLimit);
+
+    const pipeline: PipelineStage[] = [
+      ...this.discoverJobsWithSessionStages(),
+      { $match: { 'session.status': 'closed' } },
+      { $sort: { discoverPublishedAt: -1, _id: -1 } },
+      {
+        $group: {
+          _id: '$session.sessionId',
+          session: { $first: '$session' },
+          latestPublishedAt: { $max: '$discoverPublishedAt' },
+          snapshotKeys: {
+            $push: { $arrayElemAt: ['$snapshotKeys', 0] },
+          },
+          claimedSurferIds: {
+            $addToSet: {
+              $cond: [
+                { $eq: ['$claimStatus', 'claimed'] },
+                '$claimedByUserId',
+                null,
+              ],
+            },
+          },
+          videoCount: { $sum: 1 },
+        },
+      },
+      { $sort: { latestPublishedAt: -1, _id: -1 } },
+      { $limit: limit },
+    ];
+
+    const rows = (await this.videoJobModel.aggregate(pipeline).exec()) as Array<{
+      _id: string;
+      session: SurfSession;
+      latestPublishedAt: string | null;
+      snapshotKeys: (string | null | undefined)[];
+      claimedSurferIds: (string | null | undefined)[];
+      videoCount: number;
+    }>;
+
+    const sessions: SearchSessionDto[] = [];
+    for (const row of rows) {
+      sessions.push(await this.enrichSearchSessionRow(row));
+    }
+
+    return { sessions };
+  }
+
+  async listLatestWaves(
+    _viewerUserId: string,
+    rawLimit?: string,
+  ): Promise<{ waves: LatestWaveDto[] }> {
+    const limit = this.parseLatestWavesLimit(rawLimit);
+
+    const pipeline: PipelineStage[] = [
+      {
+        $match: {
+          status: 'completed',
+          processedKey: { $exists: true, $ne: null },
+          surfSessionId: { $ne: null },
+          discoverPublishedAt: { $type: 'string' },
+          claimStatus: { $in: ['auto', 'claimed'] },
+          claimedAt: { $type: 'string' },
+        },
+      },
+      { $sort: { claimedAt: -1, _id: -1 } },
+      { $limit: limit },
+      {
+        $lookup: {
+          from: 'surf_sessions',
+          localField: 'surfSessionId',
+          foreignField: 'sessionId',
+          as: 'session',
+        },
+      },
+      { $unwind: { path: '$session', preserveNullAndEmptyArrays: false } },
+    ];
+
+    const rows = (await this.videoJobModel.aggregate(pipeline).exec()) as Array<{
+      jobId: string;
+      claimedAt: string;
+      claimStatus: 'auto' | 'claimed';
+      claimedByUserId?: string | null;
+      userId: string;
+      snapshotKeys?: string[];
+      session: SurfSession;
+    }>;
+
+    const waves: LatestWaveDto[] = [];
+    for (const row of rows) {
+      waves.push(await this.enrichLatestWaveRow(row));
+    }
+
+    return { waves };
+  }
+
+  private parseLatestWavesLimit(raw: string | undefined): number {
+    if (!raw?.trim()) return LATEST_WAVES_DEFAULT_LIMIT;
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new BadRequestException('Invalid limit');
+    }
+    return Math.min(parsed, LATEST_WAVES_MAX_LIMIT);
+  }
+
+  private async enrichLatestWaveRow(row: {
+    jobId: string;
+    claimedAt: string;
+    claimStatus: 'auto' | 'claimed';
+    claimedByUserId?: string | null;
+    userId: string;
+    snapshotKeys?: string[];
+    session: SurfSession;
+  }): Promise<LatestWaveDto> {
+    const session = row.session;
+    const [region, spot] = await Promise.all([
+      this.regionModel.findOne({ regionId: session.regionId }).lean().exec(),
+      this.spotModel.findOne({ spotId: session.spotId }).lean().exec(),
+    ]);
+
+    const isUndisclosed =
+      isUndisclosedRegionId(session.regionId, session.countryCode) ||
+      isUndisclosedSpotId(session.spotId, session.countryCode);
+
+    const regionName =
+      region?.name?.trim() ||
+      (isUndisclosedRegionId(session.regionId, session.countryCode)
+        ? 'Undisclosed'
+        : 'Unknown');
+    const spotName = isUndisclosed ? null : spot?.name?.trim() || null;
+
+    const snapKey = row.snapshotKeys?.find(
+      (k): k is string => typeof k === 'string' && k.trim().length > 0,
+    );
+    const thumbnailUrl = snapKey
+      ? await this.s3.presignedGetUrl(snapKey)
+      : null;
+
+    const surfer = await this.resolveFeedSurfer({
+      userId: row.userId,
+      claimStatus: row.claimStatus,
+      claimedByUserId: row.claimedByUserId ?? null,
+    });
+
+    const shareToken =
+      typeof session.shareToken === 'string' && session.shareToken.trim()
+        ? session.shareToken.trim()
+        : null;
+
+    return {
+      jobId: row.jobId,
+      sessionId: session.sessionId,
+      shareToken,
+      claimStatus: row.claimStatus,
+      claimedAt: row.claimedAt,
+      thumbnailUrl,
+      isCommercial: session.isCommercial === true,
+      surfer,
+      location: {
+        countryCode: session.countryCode,
+        regionName,
+        spotName,
+        isUndisclosed,
+      },
+      sessionDate: session.sessionDate,
+      sessionTime: session.sessionTime?.trim() || '12:00',
+    };
+  }
+
+  private parseLatestSessionsLimit(raw: string | undefined): number {
+    if (!raw?.trim()) return LATEST_SESSIONS_DEFAULT_LIMIT;
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new BadRequestException('Invalid limit');
+    }
+    return Math.min(parsed, LATEST_SESSIONS_MAX_LIMIT);
+  }
+
+  private async enrichSearchSessionRow(row: {
+    _id: string;
+    session: SurfSession;
+    snapshotKeys: (string | null | undefined)[];
+    claimedSurferIds: (string | null | undefined)[];
+    videoCount: number;
+  }): Promise<SearchSessionDto> {
+    const session = row.session;
+    const [region, spot, authorProfile, partnerProfile] = await Promise.all([
+      this.regionModel.findOne({ regionId: session.regionId }).lean().exec(),
+      this.spotModel.findOne({ spotId: session.spotId }).lean().exec(),
+      this.userProfileModel.findOne({ userId: session.userId }).lean().exec(),
+      this.partnerProfileModel
+        .findOne({ userId: session.userId })
+        .lean()
+        .exec(),
+    ]);
+
+    const isUndisclosed =
+      isUndisclosedRegionId(session.regionId, session.countryCode) ||
+      isUndisclosedSpotId(session.spotId, session.countryCode);
+
+    const regionName =
+      region?.name?.trim() ||
+      (isUndisclosedRegionId(session.regionId, session.countryCode)
+        ? 'Undisclosed'
+        : 'Unknown');
+    const spotName = isUndisclosed ? null : spot?.name?.trim() || null;
+
+    const previewThumbnailUrls: string[] = [];
+    for (const key of row.snapshotKeys) {
+      if (
+        typeof key === 'string' &&
+        key.trim() &&
+        previewThumbnailUrls.length < SEARCH_PREVIEW_THUMBS
+      ) {
+        previewThumbnailUrls.push(await this.s3.presignedGetUrl(key.trim()));
+      }
+    }
+
+    const baseAuthor = await this.buildDiscoverAuthor(
+      session.userId,
+      'studio',
+      authorProfile ?? null,
+      (partnerProfile as {
+        partnerName?: string | null;
+        avatarKey?: string | null;
+      } | null) ?? null,
+    );
+    const partnerTypeRaw = (partnerProfile as {
+      partnerType?: string | null;
+    } | null)?.partnerType;
+    const partnerType: SearchSessionAuthorDto['partnerType'] =
+      partnerTypeRaw === 'videographer' ||
+      partnerTypeRaw === 'coach' ||
+      partnerTypeRaw === 'other'
+        ? partnerTypeRaw
+        : null;
+    const author: SearchSessionAuthorDto = {
+      ...baseAuthor,
+      partnerType: baseAuthor.isPartner ? partnerType ?? 'other' : null,
+    };
+
+    const surferIds = Array.from(
+      new Set(
+        row.claimedSurferIds.filter(
+          (id): id is string => typeof id === 'string' && id.trim().length > 0,
+        ),
+      ),
+    );
+    const surferProfiles = surferIds.length
+      ? await this.userProfileModel
+          .find({ userId: { $in: surferIds } })
+          .lean()
+          .exec()
+      : [];
+    const surferProfileMap = new Map(
+      surferProfiles.map((p) => [p.userId, p]),
+    );
+    const surfers: SearchSessionSurferDto[] = [];
+    for (const surferId of surferIds) {
+      const profile = surferProfileMap.get(surferId);
+      const avatarUrl = await this.resolveAvatarUrl(
+        profile?.avatarKey ?? null,
+      );
+      surfers.push({
+        userId: surferId,
+        displayName: profile?.displayName?.trim() || null,
+        avatarUrl,
+      });
+    }
+
+    const shareToken =
+      typeof session.shareToken === 'string' && session.shareToken.trim()
+        ? session.shareToken.trim()
+        : null;
+
+    const summaryDto = this.sessionToDto(session);
+
+    return {
+      sessionId: session.sessionId,
+      shareToken,
+      isCommercial: session.isCommercial === true,
+      countryCode: session.countryCode,
+      regionId: session.regionId,
+      spotId: session.spotId,
+      sessionDate: session.sessionDate,
+      sessionTime: session.sessionTime?.trim() || '12:00',
+      durationMinutes:
+        typeof session.durationMinutes === 'number' &&
+        session.durationMinutes >= 15
+          ? session.durationMinutes
+          : 120,
+      conditionsRating: summaryDto.conditionsRating,
+      waveTypes: summaryDto.waveTypes,
+      regionName,
+      spotName,
+      author,
+      surfers,
+      videoCount: row.videoCount,
+      previewThumbnailUrls,
     };
   }
 }

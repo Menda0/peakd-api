@@ -104,3 +104,6 @@ export const SurfSessionSchema = SchemaFactory.createForClass(SurfSession);
 
 SurfSessionSchema.index({ userId: 1, createdAt: -1 });
 SurfSessionSchema.index({ shareToken: 1 }, { unique: true, sparse: true });
+SurfSessionSchema.index({ countryCode: 1, sessionDate: 1 });
+SurfSessionSchema.index({ regionId: 1, sessionDate: 1 });
+SurfSessionSchema.index({ spotId: 1, sessionDate: 1 });

@@ -30,9 +30,18 @@ export class UserProfile {
   @Prop({ type: String, default: null })
   avatarKey: string | null;
 
-  /** Virtual currency balance (peaks). */
+  /** Virtual currency balance (peaks) — buyer-side, used to unlock waves. */
   @Prop({ type: Number, default: 0, min: 0 })
   peaksBalance: number;
+
+  /**
+   * Partner-only withdrawable balance in EUR cents. Credited (in money, not
+   * Peaks) at the time of every commercial wave unlock, debited only on bank
+   * withdrawal via Stripe Connect. Kept separate from any spendable balance
+   * so partners cannot route money through their buyer wallet.
+   */
+  @Prop({ type: Number, default: 0, min: 0 })
+  partnerEarningsCents: number;
 }
 
 export const UserProfileSchema = SchemaFactory.createForClass(UserProfile);

@@ -37,6 +37,18 @@ export class PartnerProfile {
   /** Default Peaks pricing for commercial studio sessions. */
   @Prop({ type: CommercialSettingsEmbedSchema, default: null })
   commercialSettings: CommercialSettingsEmbed | null;
+
+  /** Stripe Connect account id (`acct_...`) used to receive bank payouts. */
+  @Prop({ type: String, default: null, index: true, sparse: true })
+  stripeConnectAccountId: string | null;
+
+  /** Cached `charges_enabled && payouts_enabled` from `account.updated`. */
+  @Prop({ type: Boolean, default: false })
+  stripeConnectPayoutsEnabled: boolean;
+
+  /** Cached `requirements.currently_due` to surface KYC blockers in the UI. */
+  @Prop({ type: [String], default: [] })
+  stripeConnectRequirementsDue: string[];
 }
 
 export const PartnerProfileSchema = SchemaFactory.createForClass(PartnerProfile);
