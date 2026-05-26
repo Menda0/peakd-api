@@ -23,20 +23,12 @@ export class PartnerWithdrawal {
   @Prop({ required: true, index: true })
   stripeAccountId: string;
 
-  /** Peaks debited from `partnerEarningsPeaks`. */
-  @Prop({ required: true })
-  peaksDebited: number;
-
   /** EUR cents transferred to the connected account. */
   @Prop({ required: true })
   amountCents: number;
 
   @Prop({ required: true, default: 'eur' })
   currency: string;
-
-  /** PEAKS_PER_EURO at the time of withdrawal — for audit / future rate changes. */
-  @Prop({ required: true })
-  peaksPerEuro: number;
 
   /**
    * Stable key sent as `Idempotency-Key` to Stripe so retries are safe and
