@@ -108,6 +108,8 @@ export interface SearchSessionsPageDto {
 
 const SEARCH_SESSIONS_DEFAULT_LIMIT = 10;
 const SEARCH_SESSIONS_MAX_LIMIT = 50;
+const LATEST_SESSIONS_DEFAULT_LIMIT = 5;
+const LATEST_SESSIONS_MAX_LIMIT = 20;
 
 export interface DiscoverFeedAuthorDto {
   userId: string;
@@ -1958,115 +1960,7 @@ export class FeedService {
 
     const sessions: SearchSessionDto[] = [];
     for (const row of pageRows) {
-      const session = row.session;
-      const [region, spot, authorProfile, partnerProfile] = await Promise.all([
-        this.regionModel.findOne({ regionId: session.regionId }).lean().exec(),
-        this.spotModel.findOne({ spotId: session.spotId }).lean().exec(),
-        this.userProfileModel.findOne({ userId: session.userId }).lean().exec(),
-        this.partnerProfileModel
-          .findOne({ userId: session.userId })
-          .lean()
-          .exec(),
-      ]);
-
-      const isUndisclosed =
-        isUndisclosedRegionId(session.regionId, session.countryCode) ||
-        isUndisclosedSpotId(session.spotId, session.countryCode);
-
-      const regionName =
-        region?.name?.trim() ||
-        (isUndisclosedRegionId(session.regionId, session.countryCode)
-          ? 'Undisclosed'
-          : 'Unknown');
-      const spotName = isUndisclosed ? null : spot?.name?.trim() || null;
-
-      const previewThumbnailUrls: string[] = [];
-      for (const key of row.snapshotKeys) {
-        if (typeof key === 'string' && key.trim() && previewThumbnailUrls.length < SEARCH_PREVIEW_THUMBS) {
-          previewThumbnailUrls.push(await this.s3.presignedGetUrl(key.trim()));
-        }
-      }
-
-      const baseAuthor = await this.buildDiscoverAuthor(
-        session.userId,
-        'studio',
-        authorProfile ?? null,
-        (partnerProfile as {
-          partnerName?: string | null;
-          avatarKey?: string | null;
-        } | null) ?? null,
-      );
-      const partnerTypeRaw = (partnerProfile as {
-        partnerType?: string | null;
-      } | null)?.partnerType;
-      const partnerType: SearchSessionAuthorDto['partnerType'] =
-        partnerTypeRaw === 'videographer' ||
-        partnerTypeRaw === 'coach' ||
-        partnerTypeRaw === 'other'
-          ? partnerTypeRaw
-          : null;
-      const author: SearchSessionAuthorDto = {
-        ...baseAuthor,
-        partnerType: baseAuthor.isPartner ? partnerType ?? 'other' : null,
-      };
-
-      const surferIds = Array.from(
-        new Set(
-          row.claimedSurferIds.filter(
-            (id): id is string => typeof id === 'string' && id.trim().length > 0,
-          ),
-        ),
-      );
-      const surferProfiles = surferIds.length
-        ? await this.userProfileModel
-            .find({ userId: { $in: surferIds } })
-            .lean()
-            .exec()
-        : [];
-      const surferProfileMap = new Map(
-        surferProfiles.map((p) => [p.userId, p]),
-      );
-      const surfers: SearchSessionSurferDto[] = [];
-      for (const surferId of surferIds) {
-        const profile = surferProfileMap.get(surferId);
-        const avatarUrl = await this.resolveAvatarUrl(
-          profile?.avatarKey ?? null,
-        );
-        surfers.push({
-          userId: surferId,
-          displayName: profile?.displayName?.trim() || null,
-          avatarUrl,
-        });
-      }
-
-      const shareToken =
-        typeof session.shareToken === 'string' && session.shareToken.trim()
-          ? session.shareToken.trim()
-          : null;
-
-      sessions.push({
-        sessionId: session.sessionId,
-        shareToken,
-        isCommercial: session.isCommercial === true,
-        countryCode: session.countryCode,
-        regionId: session.regionId,
-        spotId: session.spotId,
-        sessionDate: session.sessionDate,
-        sessionTime: session.sessionTime?.trim() || '12:00',
-        durationMinutes:
-          typeof session.durationMinutes === 'number' &&
-          session.durationMinutes >= 15
-            ? session.durationMinutes
-            : 120,
-        conditionsRating: this.sessionToDto(session).conditionsRating,
-        waveTypes: this.sessionToDto(session).waveTypes,
-        regionName,
-        spotName,
-        author,
-        surfers,
-        videoCount: row.videoCount,
-        previewThumbnailUrls,
-      });
+      sessions.push(await this.enrichSearchSessionRow(row));
     }
 
     const last = pageRows[pageRows.length - 1];
@@ -2080,5 +1974,189 @@ export class FeedService {
         : null;
 
     return { sessions, nextCursor, hasMore };
+  }
+
+  async listLatestSessions(
+    _viewerUserId: string,
+    rawLimit?: string,
+  ): Promise<{ sessions: SearchSessionDto[] }> {
+    const limit = this.parseLatestSessionsLimit(rawLimit);
+
+    const pipeline: PipelineStage[] = [
+      ...this.discoverJobsWithSessionStages(),
+      { $match: { 'session.status': 'closed' } },
+      { $sort: { discoverPublishedAt: -1, _id: -1 } },
+      {
+        $group: {
+          _id: '$session.sessionId',
+          session: { $first: '$session' },
+          latestPublishedAt: { $max: '$discoverPublishedAt' },
+          snapshotKeys: {
+            $push: { $arrayElemAt: ['$snapshotKeys', 0] },
+          },
+          claimedSurferIds: {
+            $addToSet: {
+              $cond: [
+                { $eq: ['$claimStatus', 'claimed'] },
+                '$claimedByUserId',
+                null,
+              ],
+            },
+          },
+          videoCount: { $sum: 1 },
+        },
+      },
+      { $sort: { latestPublishedAt: -1, _id: -1 } },
+      { $limit: limit },
+    ];
+
+    const rows = (await this.videoJobModel.aggregate(pipeline).exec()) as Array<{
+      _id: string;
+      session: SurfSession;
+      latestPublishedAt: string | null;
+      snapshotKeys: (string | null | undefined)[];
+      claimedSurferIds: (string | null | undefined)[];
+      videoCount: number;
+    }>;
+
+    const sessions: SearchSessionDto[] = [];
+    for (const row of rows) {
+      sessions.push(await this.enrichSearchSessionRow(row));
+    }
+
+    return { sessions };
+  }
+
+  private parseLatestSessionsLimit(raw: string | undefined): number {
+    if (!raw?.trim()) return LATEST_SESSIONS_DEFAULT_LIMIT;
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new BadRequestException('Invalid limit');
+    }
+    return Math.min(parsed, LATEST_SESSIONS_MAX_LIMIT);
+  }
+
+  private async enrichSearchSessionRow(row: {
+    _id: string;
+    session: SurfSession;
+    snapshotKeys: (string | null | undefined)[];
+    claimedSurferIds: (string | null | undefined)[];
+    videoCount: number;
+  }): Promise<SearchSessionDto> {
+    const session = row.session;
+    const [region, spot, authorProfile, partnerProfile] = await Promise.all([
+      this.regionModel.findOne({ regionId: session.regionId }).lean().exec(),
+      this.spotModel.findOne({ spotId: session.spotId }).lean().exec(),
+      this.userProfileModel.findOne({ userId: session.userId }).lean().exec(),
+      this.partnerProfileModel
+        .findOne({ userId: session.userId })
+        .lean()
+        .exec(),
+    ]);
+
+    const isUndisclosed =
+      isUndisclosedRegionId(session.regionId, session.countryCode) ||
+      isUndisclosedSpotId(session.spotId, session.countryCode);
+
+    const regionName =
+      region?.name?.trim() ||
+      (isUndisclosedRegionId(session.regionId, session.countryCode)
+        ? 'Undisclosed'
+        : 'Unknown');
+    const spotName = isUndisclosed ? null : spot?.name?.trim() || null;
+
+    const previewThumbnailUrls: string[] = [];
+    for (const key of row.snapshotKeys) {
+      if (
+        typeof key === 'string' &&
+        key.trim() &&
+        previewThumbnailUrls.length < SEARCH_PREVIEW_THUMBS
+      ) {
+        previewThumbnailUrls.push(await this.s3.presignedGetUrl(key.trim()));
+      }
+    }
+
+    const baseAuthor = await this.buildDiscoverAuthor(
+      session.userId,
+      'studio',
+      authorProfile ?? null,
+      (partnerProfile as {
+        partnerName?: string | null;
+        avatarKey?: string | null;
+      } | null) ?? null,
+    );
+    const partnerTypeRaw = (partnerProfile as {
+      partnerType?: string | null;
+    } | null)?.partnerType;
+    const partnerType: SearchSessionAuthorDto['partnerType'] =
+      partnerTypeRaw === 'videographer' ||
+      partnerTypeRaw === 'coach' ||
+      partnerTypeRaw === 'other'
+        ? partnerTypeRaw
+        : null;
+    const author: SearchSessionAuthorDto = {
+      ...baseAuthor,
+      partnerType: baseAuthor.isPartner ? partnerType ?? 'other' : null,
+    };
+
+    const surferIds = Array.from(
+      new Set(
+        row.claimedSurferIds.filter(
+          (id): id is string => typeof id === 'string' && id.trim().length > 0,
+        ),
+      ),
+    );
+    const surferProfiles = surferIds.length
+      ? await this.userProfileModel
+          .find({ userId: { $in: surferIds } })
+          .lean()
+          .exec()
+      : [];
+    const surferProfileMap = new Map(
+      surferProfiles.map((p) => [p.userId, p]),
+    );
+    const surfers: SearchSessionSurferDto[] = [];
+    for (const surferId of surferIds) {
+      const profile = surferProfileMap.get(surferId);
+      const avatarUrl = await this.resolveAvatarUrl(
+        profile?.avatarKey ?? null,
+      );
+      surfers.push({
+        userId: surferId,
+        displayName: profile?.displayName?.trim() || null,
+        avatarUrl,
+      });
+    }
+
+    const shareToken =
+      typeof session.shareToken === 'string' && session.shareToken.trim()
+        ? session.shareToken.trim()
+        : null;
+
+    const summaryDto = this.sessionToDto(session);
+
+    return {
+      sessionId: session.sessionId,
+      shareToken,
+      isCommercial: session.isCommercial === true,
+      countryCode: session.countryCode,
+      regionId: session.regionId,
+      spotId: session.spotId,
+      sessionDate: session.sessionDate,
+      sessionTime: session.sessionTime?.trim() || '12:00',
+      durationMinutes:
+        typeof session.durationMinutes === 'number' &&
+        session.durationMinutes >= 15
+          ? session.durationMinutes
+          : 120,
+      conditionsRating: summaryDto.conditionsRating,
+      waveTypes: summaryDto.waveTypes,
+      regionName,
+      spotName,
+      author,
+      surfers,
+      videoCount: row.videoCount,
+      previewThumbnailUrls,
+    };
   }
 }
