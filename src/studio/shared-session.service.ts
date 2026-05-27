@@ -9,6 +9,7 @@ import {
   computeBuyClaimMinor,
   computeCheckoutTotalMinor,
   computeSponsorMinor,
+  isCommercialVideoUnlockedForViewer,
   PLATFORM_COMMISSION_PERCENT_DEFAULT,
   resolveEffectiveCommercialSettings,
 } from '../commercial/commercial-pricing';
@@ -246,7 +247,12 @@ export class SharedSessionService {
     const claimStatus = doc.claimStatus ?? 'none';
     const unlockedFor = doc.videoUnlockedForUserId?.trim() || null;
     const claimedBy = doc.claimedByUserId?.trim() || null;
-    const videoUnlockedByViewer = unlockedFor === viewerUserId;
+    const viewerIsPartner = session.userId === viewerUserId;
+    const videoUnlockedByViewer = isCommercialVideoUnlockedForViewer({
+      videoUnlockedForUserId: unlockedFor,
+      viewerUserId,
+      sessionOwnerUserId: session.userId,
+    });
     const commissionPct = this.commissionPercent();
     const currency = settings?.currency ?? null;
     const wavePriceMinor = settings?.videoPriceMinor ?? null;
@@ -262,11 +268,14 @@ export class SharedSessionService {
           commissionPct,
         ).totalMinor
       : null;
-    const canClaim = claimStatus === 'none' && !unlockedFor;
-    const canBuyClaim = Boolean(settings && buyClaimPriceMinor != null);
+    const canClaim =
+      claimStatus === 'none' && !unlockedFor && !viewerIsPartner;
+    const canBuyClaim =
+      Boolean(settings && buyClaimPriceMinor != null) && !viewerIsPartner;
     const canSponsor =
       Boolean(settings) &&
       !unlockedFor &&
+      !viewerIsPartner &&
       (claimStatus !== 'claimed' ||
         (Boolean(claimedBy) && claimedBy !== viewerUserId));
     return {

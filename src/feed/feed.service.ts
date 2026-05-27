@@ -24,6 +24,7 @@ import {
   computeBuyClaimMinor,
   computeCheckoutTotalMinor,
   computeSponsorMinor,
+  isCommercialVideoUnlockedForViewer,
   PLATFORM_COMMISSION_PERCENT_DEFAULT,
   resolveEffectiveCommercialSettings,
 } from '../commercial/commercial-pricing';
@@ -581,7 +582,11 @@ export class FeedService {
     const claimStatus = job.claimStatus ?? 'none';
     const unlockedFor = job.videoUnlockedForUserId?.trim() || null;
     const claimedBy = job.claimedByUserId?.trim() || null;
-    const videoUnlockedByViewer = unlockedFor === viewerUserId;
+    const videoUnlockedByViewer = isCommercialVideoUnlockedForViewer({
+      videoUnlockedForUserId: unlockedFor,
+      viewerUserId,
+      sessionOwnerUserId: session.userId,
+    });
     const commissionPct = this.commissionPercent();
     const stripeFeeConfig = this.stripeFeeConfig();
     const currency = settings?.currency ?? null;
