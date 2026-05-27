@@ -416,16 +416,23 @@ export class SharedSessionService {
           ...extras,
         };
         canClaim = viewerId ? extras.canClaim : false;
-        const showVideo = extras.videoUnlockedByViewer;
+        const viewerIsSessionOwner =
+          Boolean(viewerId) && viewerId === session.userId;
+        const showVideo =
+          extras.videoUnlockedByViewer || viewerIsSessionOwner;
+        const showDownloads = showVideo;
         videoUrl = showVideo ? processedDownloadUrl : null;
-        processedDownload = showVideo ? processedDownloadUrl : null;
-        if (!showVideo) {
+        processedDownload = showDownloads ? processedDownloadUrl : null;
+        if (!showDownloads) {
           originalDownload = null;
         }
       }
 
+      const viewerIsSessionOwner =
+        Boolean(viewerId) && viewerId === session.userId;
       const waveHasOriginal = isCommercial
-        ? commercialFields.videoUnlockedByViewer && hasOriginal
+        ? hasOriginal &&
+          (commercialFields.videoUnlockedByViewer || viewerIsSessionOwner)
         : hasOriginal;
 
       waves.push({
