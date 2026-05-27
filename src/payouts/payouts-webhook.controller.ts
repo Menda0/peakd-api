@@ -109,21 +109,7 @@ export class PayoutsWebhookController {
         await this.payouts.syncConnectAccountFromEvent(account);
         break;
       }
-      case 'transfer.created':
-      case 'transfer.reversed': {
-        const transfer = event.data.object as Stripe.Transfer;
-        await this.payouts.syncWithdrawalFromTransfer(transfer, event.type);
-        break;
-      }
-      case 'payout.paid':
-      case 'payout.failed':
-        // Connected-account payout events — useful for partner notifications.
-        // We don't change state here because the source of truth for our
-        // partner_withdrawals collection is the platform-side Transfer.
-        this.logger.log(`Received ${event.type} for ${event.data.object.id}`);
-        break;
       default:
-        // Unhandled event types are acknowledged silently.
         break;
     }
     return { received: true };
