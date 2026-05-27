@@ -9,11 +9,9 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, PipelineStage } from 'mongoose';
 import { S3Service } from '../s3/s3.service';
 import {
-  isSessionLocationUndisclosed,
   isUndisclosedRegionId,
   isUndisclosedSpotId,
 } from '../studio/geo-undisclosed';
-import type { CheckoutOptions } from '../commercial/commercial-pricing';
 import { Region } from '../studio/schemas/region.schema';
 import { Spot } from '../studio/schemas/spot.schema';
 import { SurfSession } from '../studio/schemas/surf-session.schema';
@@ -21,15 +19,18 @@ import { PartnerProfile } from '../partner/schemas/partner-profile.schema';
 import { UserProfile } from '../users/schemas/user-profile.schema';
 import { CommercialWaveService } from '../commercial/commercial-wave.service';
 import {
-  allocateBuyClaimLineBreakdowns,
-  checkoutBreakdownWithDiscount,
-  computeBuyClaimPeaks,
-  computeCheckoutTotal,
-  computeSponsorPeaks,
-  COMMUNITY_FEE_PERCENT,
+  allocateBuyClaimLineBreakdownsMinor,
+  computeBuyClaimMinor,
+  computeCheckoutTotalMinor,
+  computeSponsorMinor,
+  PLATFORM_COMMISSION_PERCENT_DEFAULT,
   resolveEffectiveCommercialSettings,
 } from '../commercial/commercial-pricing';
 import type { CommercialSettings } from '../commercial/commercial-settings.types';
+import {
+  BILLING_CONFIG_KEY,
+  type BillingConfigValues,
+} from '../config/billing.config';
 import { VideoJob } from '../video/schemas/video-job.schema';
 import type { VideoJobStatus } from '../video/schemas/video-job.schema';
 import type { VideoClaimStatus } from '../video/schemas/video-job.schema';
@@ -177,9 +178,15 @@ export interface DiscoverFeedItemDto {
   isCommercial: boolean;
   snapshotUrls: string[];
   videoUnlockedByViewer: boolean;
-  wavePricePeaks: number | null;
-  buyClaimPricePeaks: number | null;
-  sponsorPricePeaks: number | null;
+  /** Partner ISO 4217 currency for this wave, null for non-commercial. */
+  currency: string | null;
+  /** Partner price per wave, minor units (e.g. cents). */
+  wavePriceMinor: number | null;
+  /** Buy-and-claim total per wave (price + commission + Stripe-fee gross-up). */
+  buyClaimPriceMinor: number | null;
+  /** Sponsor total per wave (price + commission + Stripe-fee gross-up). */
+  sponsorPriceMinor: number | null;
+  partnerUserId: string | null;
   canClaim: boolean;
   canBuyClaim: boolean;
   canSponsor: boolean;
@@ -194,14 +201,16 @@ export interface SurferProfileDto {
   regionName: string | null;
 }
 
-export interface CheckoutPeaksBreakdownDto {
-  basePeaks: number;
-  communityFeePeaks: number;
-  totalPeaks: number;
-  communityFeePercent: number;
-  listPricePeaks: number;
+export interface CheckoutBreakdownDto {
+  basePriceMinor: number;
+  commissionMinor: number;
+  stripeProcessingFeeMinor: number;
+  totalMinor: number;
+  commissionPercent: number;
+  listPriceMinor: number;
   discountPercent: number;
-  discountPeaksSaved: number;
+  discountSavedMinor: number;
+  currency: string;
 }
 
 export interface WaveCheckoutSessionWaveDto {
@@ -211,8 +220,8 @@ export interface WaveCheckoutSessionWaveDto {
   isCurrent: boolean;
   canBuyClaim: boolean;
   canSponsor: boolean;
-  buyClaimTotalPeaks: number | null;
-  sponsorTotalPeaks: number | null;
+  buyClaimTotalMinor: number | null;
+  sponsorTotalMinor: number | null;
 }
 
 export type UnlockCartIntent = 'buy_claim' | 'sponsor';
@@ -229,18 +238,33 @@ export interface UnlockCartQuoteLineDto {
   sessionId: string;
   sessionLabel: string;
   thumbnailUrl: string | null;
-  listPricePeaks: number;
+  currency: string;
+  listPriceMinor: number;
   discountPercent: number;
-  discountPeaksSaved: number;
-  basePeaks: number;
-  communityFeePeaks: number;
-  totalPeaks: number;
-  communityFeePercent: number;
+  discountSavedMinor: number;
+  basePriceMinor: number;
+  commissionMinor: number;
+  stripeProcessingFeeMinor: number;
+  totalMinor: number;
+  commissionPercent: number;
+}
+
+export interface UnlockCartQuoteGroupDto {
+  partnerUserId: string;
+  partnerName: string;
+  partnerAvatarUrl: string | null;
+  currency: string;
+  lines: UnlockCartQuoteLineDto[];
+  partnerSubtotalMinor: number;
+  platformCommissionMinor: number;
+  stripeProcessingFeeMinor: number;
+  totalAmountMinor: number;
+  platformCommissionPercent: number;
 }
 
 export interface UnlockCartQuoteDto {
-  lines: UnlockCartQuoteLineDto[];
-  totalPeaks: number;
+  groups: UnlockCartQuoteGroupDto[];
+  totalsByCurrency: Record<string, number>;
 }
 
 export interface WaveCheckoutContextDto {
@@ -250,18 +274,19 @@ export interface WaveCheckoutContextDto {
   location: DiscoverFeedLocationDto;
   sessionSummary: DiscoverFeedSessionDto;
   partner: {
+    partnerUserId: string;
     partnerName: string;
     avatarUrl: string | null;
     descriptionMarkdown: string | null;
   };
   commercialSettings: CommercialSettings;
-  communityFeePercent: number;
+  commissionPercent: number;
   canClaim: boolean;
   canBuyClaim: boolean;
   canSponsor: boolean;
   claimStatus: VideoClaimStatus;
-  buyClaim: CheckoutPeaksBreakdownDto;
-  sponsor: CheckoutPeaksBreakdownDto;
+  buyClaim: CheckoutBreakdownDto;
+  sponsor: CheckoutBreakdownDto;
   surfer: SurferProfileDto | null;
   sessionWaves: WaveCheckoutSessionWaveDto[];
 }
@@ -288,8 +313,9 @@ export interface MyVideoItemDto {
   isCommercial: boolean;
   snapshotUrls: string[];
   videoUnlockedByViewer: boolean;
-  wavePricePeaks: number | null;
-  buyClaimPricePeaks: number | null;
+  currency: string | null;
+  wavePriceMinor: number | null;
+  buyClaimPriceMinor: number | null;
 }
 
 export interface DiscoverFeedPageDto {
@@ -479,17 +505,21 @@ export class FeedService {
     return urls;
   }
 
-  private checkoutOptionsForSession(session: {
-    countryCode: string;
-    regionId: string;
-    spotId: string;
-  }): CheckoutOptions {
+  private commissionPercent(): number {
+    return (
+      this.config.get<BillingConfigValues>(BILLING_CONFIG_KEY)
+        ?.platformCommissionPercent ?? PLATFORM_COMMISSION_PERCENT_DEFAULT
+    );
+  }
+
+  private stripeFeeConfig(): {
+    stripeProcessingFeePercent: number;
+    stripeProcessingFeeFixedMinor: number;
+  } {
+    const b = this.config.get<BillingConfigValues>(BILLING_CONFIG_KEY);
     return {
-      waiveCommunityFee: isSessionLocationUndisclosed(
-        session.countryCode,
-        session.regionId,
-        session.spotId,
-      ),
+      stripeProcessingFeePercent: b?.stripeProcessingFeePercent ?? 2.9,
+      stripeProcessingFeeFixedMinor: b?.stripeProcessingFeeFixedMinor ?? 30,
     };
   }
 
@@ -513,9 +543,11 @@ export class FeedService {
     isCommercial: boolean;
     snapshotUrls: string[];
     videoUnlockedByViewer: boolean;
-    wavePricePeaks: number | null;
-    buyClaimPricePeaks: number | null;
-    sponsorPricePeaks: number | null;
+    currency: string | null;
+    wavePriceMinor: number | null;
+    buyClaimPriceMinor: number | null;
+    sponsorPriceMinor: number | null;
+    partnerUserId: string | null;
     canClaim: boolean;
     canBuyClaim: boolean;
     canSponsor: boolean;
@@ -526,9 +558,11 @@ export class FeedService {
         isCommercial: false,
         snapshotUrls: [],
         videoUnlockedByViewer: true,
-        wavePricePeaks: null,
-        buyClaimPricePeaks: null,
-        sponsorPricePeaks: null,
+        currency: null,
+        wavePriceMinor: null,
+        buyClaimPriceMinor: null,
+        sponsorPriceMinor: null,
+        partnerUserId: null,
         canClaim: false,
         canBuyClaim: false,
         canSponsor: false,
@@ -546,25 +580,31 @@ export class FeedService {
     const unlockedFor = job.videoUnlockedForUserId?.trim() || null;
     const claimedBy = job.claimedByUserId?.trim() || null;
     const videoUnlockedByViewer = unlockedFor === viewerUserId;
-    const checkoutOpts = this.checkoutOptionsForSession(session);
-    const wavePricePeaks = settings?.videoPricePeaks ?? null;
-    const buyClaimPricePeaks = settings
-      ? computeCheckoutTotal(
-          computeBuyClaimPeaks(settings, 1).totalPeaks,
-          checkoutOpts,
-        ).totalPeaks
+    const commissionPct = this.commissionPercent();
+    const stripeFeeConfig = this.stripeFeeConfig();
+    const currency = settings?.currency ?? null;
+    const wavePriceMinor = settings?.videoPriceMinor ?? null;
+    const buyClaimPriceMinor = settings
+      ? computeCheckoutTotalMinor(
+          computeBuyClaimMinor(settings, 1).totalMinor,
+          commissionPct,
+          stripeFeeConfig,
+        ).totalMinor
       : null;
-    const sponsorPricePeaks = settings
-      ? computeCheckoutTotal(computeSponsorPeaks(settings, 1), checkoutOpts).totalPeaks
+    const sponsorPriceMinor = settings
+      ? computeCheckoutTotalMinor(
+          computeSponsorMinor(settings, 1),
+          commissionPct,
+          stripeFeeConfig,
+        ).totalMinor
       : null;
-    // The session owner (partner) can't buy or sponsor their own wave: the
-    // backend rejects it because debit and credit would hit the same account
-    // and effectively make the purchase free (and not change their balance).
+    // The session owner (partner) can't buy or sponsor their own wave —
+    // they'd be charging themselves through Stripe to credit themselves.
     const viewerIsPartner = session.userId === viewerUserId;
     const canClaim =
       claimStatus === 'none' && !unlockedFor && !viewerIsPartner;
     const canBuyClaim =
-      Boolean(settings && buyClaimPricePeaks != null) && !viewerIsPartner;
+      Boolean(settings && buyClaimPriceMinor != null) && !viewerIsPartner;
     const canSponsor =
       Boolean(settings) &&
       !unlockedFor &&
@@ -575,9 +615,11 @@ export class FeedService {
       isCommercial: true,
       snapshotUrls: [],
       videoUnlockedByViewer,
-      wavePricePeaks,
-      buyClaimPricePeaks,
-      sponsorPricePeaks,
+      currency,
+      wavePriceMinor,
+      buyClaimPriceMinor,
+      sponsorPriceMinor,
+      partnerUserId: session.userId,
       canClaim,
       canBuyClaim,
       canSponsor,
@@ -609,14 +651,11 @@ export class FeedService {
     items: UnlockCartQuoteRequestItem[],
   ): Promise<UnlockCartQuoteDto> {
     if (!Array.isArray(items) || items.length === 0) {
-      return { lines: [], totalPeaks: 0 };
+      return { groups: [], totalsByCurrency: {} };
     }
 
     type SessionMeta = {
       sessionLabel: string;
-      regionName: string;
-      spotName: string | null;
-      isUndisclosed: boolean;
     };
 
     type Loaded = {
@@ -658,7 +697,10 @@ export class FeedService {
           .exec();
         const spot = isUndisclosed
           ? null
-          : await this.spotModel.findOne({ spotId: fullSession.spotId }).lean().exec();
+          : await this.spotModel
+              .findOne({ spotId: fullSession.spotId })
+              .lean()
+              .exec();
         const regionName =
           region?.name?.trim() ||
           (isUndisclosedRegionId(fullSession.regionId, cc)
@@ -666,9 +708,6 @@ export class FeedService {
             : 'Unknown');
         const spotName = isUndisclosed ? null : spot?.name?.trim() || null;
         sessionMeta = {
-          regionName,
-          spotName,
-          isUndisclosed,
           sessionLabel: this.formatUnlockCartSessionLabel(
             fullSession,
             regionName,
@@ -696,20 +735,81 @@ export class FeedService {
       });
     }
 
-    const lines: UnlockCartQuoteLineDto[] = [];
-    const buyClaimBySession = new Map<string, Loaded[]>();
-
+    // Group by partner. Within a partner, buy_claim items get a volume
+    // discount applied to the whole batch (regardless of session); sponsor
+    // items are priced independently per line.
+    type PartnerGroup = {
+      partnerUserId: string;
+      currency: string;
+      items: Loaded[];
+    };
+    const byPartner = new Map<string, PartnerGroup>();
     for (const row of loaded) {
-      const checkoutOpts: CheckoutOptions = {
-        waiveCommunityFee: row.sessionMeta.isUndisclosed,
-      };
-      if (row.intent === 'sponsor') {
-        const sponsorBase = computeSponsorPeaks(row.ctx.settings, 1);
-        const priced = checkoutBreakdownWithDiscount(
-          sponsorBase,
-          row.ctx.settings.videoPricePeaks,
-          0,
-          checkoutOpts,
+      const pid = row.ctx.session.userId;
+      const cur = row.ctx.settings.currency.toUpperCase();
+      const key = `${pid}::${cur}`;
+      const existing = byPartner.get(key);
+      if (existing) {
+        existing.items.push(row);
+      } else {
+        byPartner.set(key, {
+          partnerUserId: pid,
+          currency: cur,
+          items: [row],
+        });
+      }
+    }
+
+    const groups: UnlockCartQuoteGroupDto[] = [];
+    const totalsByCurrency: Record<string, number> = {};
+    const commissionPct = this.commissionPercent();
+    const stripeFeeConfig = this.stripeFeeConfig();
+
+    for (const group of byPartner.values()) {
+      const settings = group.items[0]!.ctx.settings;
+      const buyClaimItems = group.items.filter(
+        (i) => i.intent === 'buy_claim',
+      );
+      const sponsorItems = group.items.filter((i) => i.intent === 'sponsor');
+      buyClaimItems.sort((a, b) => a.jobId.localeCompare(b.jobId));
+      sponsorItems.sort((a, b) => a.jobId.localeCompare(b.jobId));
+
+      const lines: UnlockCartQuoteLineDto[] = [];
+      if (buyClaimItems.length > 0) {
+        const breakdowns = allocateBuyClaimLineBreakdownsMinor(
+          settings,
+          buyClaimItems.length,
+          commissionPct,
+          stripeFeeConfig,
+        );
+        for (let i = 0; i < buyClaimItems.length; i += 1) {
+          const row = buyClaimItems[i]!;
+          const priced = breakdowns[i]!;
+          lines.push({
+            jobId: row.jobId,
+            intent: 'buy_claim',
+            videoName: row.videoName,
+            sessionId: row.ctx.session.sessionId,
+            sessionLabel: row.sessionMeta.sessionLabel,
+            thumbnailUrl: row.thumbnailUrl,
+            currency: group.currency,
+            listPriceMinor: priced.listPriceMinor,
+            discountPercent: priced.discountPercent,
+            discountSavedMinor: priced.discountSavedMinor,
+            basePriceMinor: priced.basePriceMinor,
+            commissionMinor: priced.commissionMinor,
+            stripeProcessingFeeMinor: priced.stripeProcessingFeeMinor,
+            totalMinor: priced.totalMinor,
+            commissionPercent: priced.commissionPercent,
+          });
+        }
+      }
+      for (const row of sponsorItems) {
+        const basePriceMinor = computeSponsorMinor(settings, 1);
+        const breakdown = computeCheckoutTotalMinor(
+          basePriceMinor,
+          commissionPct,
+          stripeFeeConfig,
         );
         lines.push({
           jobId: row.jobId,
@@ -718,106 +818,104 @@ export class FeedService {
           sessionId: row.ctx.session.sessionId,
           sessionLabel: row.sessionMeta.sessionLabel,
           thumbnailUrl: row.thumbnailUrl,
-          listPricePeaks: priced.listPricePeaks,
-          discountPercent: priced.discountPercent,
-          discountPeaksSaved: priced.discountPeaksSaved,
-          basePeaks: priced.basePeaks,
-          communityFeePeaks: priced.communityFeePeaks,
-          totalPeaks: priced.totalPeaks,
-          communityFeePercent: priced.communityFeePercent,
+          currency: group.currency,
+          listPriceMinor: settings.videoPriceMinor,
+          discountPercent: 0,
+          discountSavedMinor: 0,
+          basePriceMinor: breakdown.basePriceMinor,
+          commissionMinor: breakdown.commissionMinor,
+          stripeProcessingFeeMinor: breakdown.stripeProcessingFeeMinor,
+          totalMinor: breakdown.totalMinor,
+          commissionPercent: breakdown.commissionPercent,
         });
-        continue;
       }
-      const sid = row.ctx.session.sessionId;
-      const bucket = buyClaimBySession.get(sid) ?? [];
-      bucket.push(row);
-      buyClaimBySession.set(sid, bucket);
-    }
 
-    for (const [, group] of buyClaimBySession) {
-      group.sort((a, b) => a.jobId.localeCompare(b.jobId));
-      const settings = group[0]!.ctx.settings;
-      const checkoutOpts: CheckoutOptions = {
-        waiveCommunityFee: group[0]!.sessionMeta.isUndisclosed,
-      };
-      const pricedLines = allocateBuyClaimLineBreakdowns(
-        settings,
-        group.length,
-        checkoutOpts,
+      const partnerSubtotalMinor = lines.reduce(
+        (sum, line) => sum + line.basePriceMinor,
+        0,
       );
-      for (let i = 0; i < group.length; i += 1) {
-        const row = group[i]!;
-        const priced = pricedLines[i]!;
-        lines.push({
-          jobId: row.jobId,
-          intent: 'buy_claim',
-          videoName: row.videoName,
-          sessionId: row.ctx.session.sessionId,
-          sessionLabel: row.sessionMeta.sessionLabel,
-          thumbnailUrl: row.thumbnailUrl,
-          listPricePeaks: priced.listPricePeaks,
-          discountPercent: priced.discountPercent,
-          discountPeaksSaved: priced.discountPeaksSaved,
-          basePeaks: priced.basePeaks,
-          communityFeePeaks: priced.communityFeePeaks,
-          totalPeaks: priced.totalPeaks,
-          communityFeePercent: priced.communityFeePercent,
-        });
-      }
+      const platformCommissionMinor = lines.reduce(
+        (sum, line) => sum + line.commissionMinor,
+        0,
+      );
+      const stripeProcessingFeeMinor = lines.reduce(
+        (sum, line) => sum + line.stripeProcessingFeeMinor,
+        0,
+      );
+      const totalAmountMinor = lines.reduce((sum, line) => sum + line.totalMinor, 0);
+
+      const [partnerProfile, authorProfile] = await Promise.all([
+        this.partnerProfileModel
+          .findOne({ userId: group.partnerUserId })
+          .lean()
+          .exec(),
+        this.userProfileModel
+          .findOne({ userId: group.partnerUserId })
+          .lean()
+          .exec(),
+      ]);
+      const partnerName =
+        partnerProfile?.partnerName?.trim() ||
+        authorProfile?.displayName?.trim() ||
+        'Partner';
+      const partnerAvatarUrl = await this.resolveAvatarUrl(
+        partnerProfile?.avatarKey?.trim() ||
+          authorProfile?.avatarKey?.trim() ||
+          null,
+      );
+
+      groups.push({
+        partnerUserId: group.partnerUserId,
+        partnerName,
+        partnerAvatarUrl,
+        currency: group.currency,
+        lines,
+        partnerSubtotalMinor,
+        platformCommissionMinor,
+        stripeProcessingFeeMinor,
+        totalAmountMinor,
+        platformCommissionPercent: commissionPct,
+      });
+
+      const curKey = group.currency.toLowerCase();
+      totalsByCurrency[curKey] =
+        (totalsByCurrency[curKey] ?? 0) + totalAmountMinor;
     }
 
-    lines.sort((a, b) => a.jobId.localeCompare(b.jobId));
-    const totalPeaks = lines.reduce((sum, line) => sum + line.totalPeaks, 0);
-    return { lines, totalPeaks };
+    groups.sort((a, b) => a.partnerName.localeCompare(b.partnerName));
+    return { groups, totalsByCurrency };
   }
 
-  async buyAndClaimVideoWaves(
+  async startSingleWaveCheckout(
     viewerUserId: string,
+    jobId: string,
+    intent: UnlockCartIntent,
+  ): Promise<{ url: string; orderId: string }> {
+    const ctx = await this.commercialWave.loadCommercialContext(jobId);
+    return this.commercialWave.createWaveOrderCheckout({
+      buyerUserId: viewerUserId,
+      partnerUserId: ctx.session.userId,
+      jobIds: [jobId],
+      intent,
+    });
+  }
+
+  async startPartnerCheckout(
+    viewerUserId: string,
+    partnerUserId: string,
     jobIds: string[],
-  ): Promise<{
-    jobIds: string[];
-    peaksCharged: number;
-    discountPercent: number;
-    surfer: SurferProfileDto;
-  }> {
-    const result = await this.commercialWave.buyAndClaimWaves(
-      viewerUserId,
+    intent: UnlockCartIntent,
+  ): Promise<{ url: string; orderId: string }> {
+    return this.commercialWave.createWaveOrderCheckout({
+      buyerUserId: viewerUserId,
+      partnerUserId,
       jobIds,
-    );
-    const surfer = await this.buildSurferDto(viewerUserId);
-    return { ...result, surfer };
+      intent,
+    });
   }
 
-  async buyAndClaimVideoWave(
-    viewerUserId: string,
-    jobId: string,
-    quantity = 1,
-  ): Promise<{
-    jobId: string;
-    claimStatus: VideoClaimStatus;
-    claimedAt: string;
-    peaksCharged: number;
-    discountPercent: number;
-    surfer: SurferProfileDto;
-  }> {
-    const result = await this.commercialWave.buyAndClaimWave(
-      viewerUserId,
-      jobId,
-      quantity,
-    );
-    const surfer = await this.buildSurferDto(viewerUserId);
-    return { ...result, surfer };
-  }
-
-  async sponsorVideoWave(
-    sponsorUserId: string,
-    jobId: string,
-  ): Promise<{
-    jobId: string;
-    peaksCharged: number;
-    beneficiaryUserId: string;
-  }> {
-    return this.commercialWave.sponsorWaveUnlock(sponsorUserId, jobId);
+  async getOrderStatus(viewerUserId: string, orderId: string) {
+    return this.commercialWave.getOrderStatus(viewerUserId, orderId);
   }
 
   async getWaveCheckoutContext(
@@ -830,9 +928,14 @@ export class FeedService {
     }
     const sessionId = doc.surfSessionId?.trim();
     if (!sessionId) {
-      throw new BadRequestException('Video is not part of a commercial session');
+      throw new BadRequestException(
+        'Video is not part of a commercial session',
+      );
     }
-    const session = await this.surfSessionModel.findOne({ sessionId }).lean().exec();
+    const session = await this.surfSessionModel
+      .findOne({ sessionId })
+      .lean()
+      .exec();
     if (!session || session.isCommercial !== true) {
       throw new BadRequestException('Session is not commercial');
     }
@@ -856,29 +959,53 @@ export class FeedService {
       viewerUserId,
     );
     const countryCode = session.countryCode;
-    const isUndisclosed = isSessionLocationUndisclosed(
-      countryCode,
-      session.regionId,
-      session.spotId,
+    const isUndisclosed =
+      isUndisclosedRegionId(session.regionId, countryCode) ||
+      isUndisclosedSpotId(session.spotId, countryCode);
+    const commissionPct = this.commissionPercent();
+    const stripeFeeConfig = this.stripeFeeConfig();
+    const buyClaimQuote = computeBuyClaimMinor(settings, 1);
+    const buyClaimBreakdown = computeCheckoutTotalMinor(
+      buyClaimQuote.totalMinor,
+      commissionPct,
+      stripeFeeConfig,
     );
-    const checkoutOpts: CheckoutOptions = { waiveCommunityFee: isUndisclosed };
-    const buyClaimPriced = computeBuyClaimPeaks(settings, 1);
-    const sponsorBase = computeSponsorPeaks(settings, 1);
-    const buyClaim = checkoutBreakdownWithDiscount(
-      buyClaimPriced.totalPeaks,
-      settings.videoPricePeaks,
-      buyClaimPriced.discountPercent,
-      checkoutOpts,
-    );
-    const sponsor = checkoutBreakdownWithDiscount(
+    const sponsorBase = computeSponsorMinor(settings, 1);
+    const sponsorBreakdown = computeCheckoutTotalMinor(
       sponsorBase,
-      settings.videoPricePeaks,
-      0,
-      checkoutOpts,
+      commissionPct,
+      stripeFeeConfig,
     );
+    const buyClaim: CheckoutBreakdownDto = {
+      basePriceMinor: buyClaimBreakdown.basePriceMinor,
+      commissionMinor: buyClaimBreakdown.commissionMinor,
+      stripeProcessingFeeMinor: buyClaimBreakdown.stripeProcessingFeeMinor,
+      totalMinor: buyClaimBreakdown.totalMinor,
+      commissionPercent: buyClaimBreakdown.commissionPercent,
+      listPriceMinor: settings.videoPriceMinor,
+      discountPercent: buyClaimQuote.discountPercent,
+      discountSavedMinor: Math.max(
+        0,
+        settings.videoPriceMinor - buyClaimBreakdown.basePriceMinor,
+      ),
+      currency: settings.currency,
+    };
+    const sponsor: CheckoutBreakdownDto = {
+      basePriceMinor: sponsorBreakdown.basePriceMinor,
+      commissionMinor: sponsorBreakdown.commissionMinor,
+      stripeProcessingFeeMinor: sponsorBreakdown.stripeProcessingFeeMinor,
+      totalMinor: sponsorBreakdown.totalMinor,
+      commissionPercent: sponsorBreakdown.commissionPercent,
+      listPriceMinor: settings.videoPriceMinor,
+      discountPercent: 0,
+      discountSavedMinor: 0,
+      currency: settings.currency,
+    };
     const regionName =
       region?.name?.trim() ||
-      (isUndisclosedRegionId(session.regionId, countryCode) ? 'Undisclosed' : 'Unknown');
+      (isUndisclosedRegionId(session.regionId, countryCode)
+        ? 'Undisclosed'
+        : 'Unknown');
     const spotName = isUndisclosed ? null : spot?.name?.trim() || null;
 
     const partnerName =
@@ -886,7 +1013,9 @@ export class FeedService {
       authorProfile?.displayName?.trim() ||
       'Partner';
     const partnerAvatarUrl = await this.resolveAvatarUrl(
-      partnerProfile?.avatarKey?.trim() || authorProfile?.avatarKey?.trim() || null,
+      partnerProfile?.avatarKey?.trim() ||
+        authorProfile?.avatarKey?.trim() ||
+        null,
     );
 
     const sessionJobs = await this.videoJobModel
@@ -901,15 +1030,20 @@ export class FeedService {
 
     const sessionWaves: WaveCheckoutSessionWaveDto[] = [];
     for (const row of sessionJobs) {
-      const rowExtras = this.commercialExtras(session, partnerProfile, row, viewerUserId);
+      const rowExtras = this.commercialExtras(
+        session,
+        partnerProfile,
+        row,
+        viewerUserId,
+      );
       if (rowExtras.videoUnlockedByViewer) continue;
       const thumbKey = row.snapshotKeys?.[0];
       let thumbnailUrl: string | null = null;
       if (thumbKey) {
         thumbnailUrl = await this.s3.presignedGetUrl(thumbKey);
       }
-      const rowBuyBase = computeBuyClaimPeaks(settings, 1).totalPeaks;
-      const rowSponsorBase = computeSponsorPeaks(settings, 1);
+      const rowBuyBase = computeBuyClaimMinor(settings, 1).totalMinor;
+      const rowSponsorBase = computeSponsorMinor(settings, 1);
       sessionWaves.push({
         jobId: row.jobId,
         originalFilename: row.originalFilename ?? 'video',
@@ -917,11 +1051,19 @@ export class FeedService {
         isCurrent: row.jobId === jobId,
         canBuyClaim: rowExtras.canBuyClaim,
         canSponsor: rowExtras.canSponsor,
-        buyClaimTotalPeaks: rowExtras.canBuyClaim
-          ? computeCheckoutTotal(rowBuyBase, checkoutOpts).totalPeaks
+        buyClaimTotalMinor: rowExtras.canBuyClaim
+          ? computeCheckoutTotalMinor(
+              rowBuyBase,
+              commissionPct,
+              stripeFeeConfig,
+            ).totalMinor
           : null,
-        sponsorTotalPeaks: rowExtras.canSponsor
-          ? computeCheckoutTotal(rowSponsorBase, checkoutOpts).totalPeaks
+        sponsorTotalMinor: rowExtras.canSponsor
+          ? computeCheckoutTotalMinor(
+              rowSponsorBase,
+              commissionPct,
+              stripeFeeConfig,
+            ).totalMinor
           : null,
       });
     }
@@ -944,12 +1086,13 @@ export class FeedService {
       },
       sessionSummary: this.sessionToDto(session),
       partner: {
+        partnerUserId: session.userId,
         partnerName,
         avatarUrl: partnerAvatarUrl,
         descriptionMarkdown: partnerProfile?.descriptionMarkdown ?? null,
       },
       commercialSettings: settings,
-      communityFeePercent: COMMUNITY_FEE_PERCENT,
+      commissionPercent: commissionPct,
       canClaim: extras.canClaim,
       canBuyClaim: extras.canBuyClaim,
       canSponsor: extras.canSponsor,
@@ -1271,8 +1414,9 @@ export class FeedService {
         isCommercial: dto.isCommercial,
         snapshotUrls: dto.snapshotUrls,
         videoUnlockedByViewer: dto.videoUnlockedByViewer,
-        wavePricePeaks: dto.wavePricePeaks,
-        buyClaimPricePeaks: dto.buyClaimPricePeaks,
+        currency: dto.currency,
+        wavePriceMinor: dto.wavePriceMinor,
+        buyClaimPriceMinor: dto.buyClaimPriceMinor,
       });
     }
     return items;

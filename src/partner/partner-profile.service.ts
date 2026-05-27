@@ -1,7 +1,6 @@
 import {
   BadRequestException,
   Injectable,
-  InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -9,10 +8,6 @@ import { InjectModel } from '@nestjs/mongoose';
 import { randomUUID } from 'node:crypto';
 import type { Express } from 'express';
 import { Model } from 'mongoose';
-import {
-  BILLING_CONFIG_KEY,
-  type BillingConfigValues,
-} from '../config/billing.config';
 import { S3Service } from '../s3/s3.service';
 import {
   parseCommercialSettings,
@@ -29,13 +24,11 @@ export interface PartnerProfileResponseDto {
   descriptionMarkdown: string | null;
   avatarUrl: string | null;
   countryCode: string | null;
-  commercialSettings: CommercialSettings | null;
   /**
-   * Current Peaks-per-EUR exchange rate. Partners set their video price in
-   * EUR on the profile UI; the value is still persisted in Peaks (so buyer
-   * checkout math stays untouched), and the UI converts using this rate.
+   * Partner-defined commercial pricing. `currency` is uppercase ISO 4217 and
+   * `videoPriceMinor` is integer minor units (cents/etc.) of that currency.
    */
-  peaksPerEuro: number;
+  commercialSettings: CommercialSettings | null;
 }
 
 export interface PartnerProfilePatchBody {
@@ -124,14 +117,6 @@ export class PartnerProfileService {
     return parseCommercialSettings(doc.commercialSettings);
   }
 
-  private billing(): BillingConfigValues {
-    const cfg = this.config.get<BillingConfigValues>(BILLING_CONFIG_KEY);
-    if (!cfg) {
-      throw new InternalServerErrorException('Billing config not loaded');
-    }
-    return cfg;
-  }
-
   private async toDto(doc: {
     partnerName: string | null;
     partnerType: string;
@@ -147,7 +132,6 @@ export class PartnerProfileService {
       avatarUrl: await this.resolveAvatarUrl(doc.avatarKey),
       countryCode: doc.countryCode,
       commercialSettings: this.commercialSettingsFromDoc(doc),
-      peaksPerEuro: this.billing().peaksPerEuro,
     };
   }
 

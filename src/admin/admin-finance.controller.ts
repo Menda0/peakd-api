@@ -9,8 +9,8 @@ export class AdminFinanceController {
 
   /**
    * One-shot snapshot of platform finances:
-   * Stripe balance, revenue, fees, partner liability, paid-out, retention,
-   * net margin, and a "can we cover all withdrawals right now?" delta.
+   * Stripe balance, revenue, fees, partner transfers (destination charges),
+   * commission retention, and net margin.
    */
   @Get('overview')
   getOverview() {

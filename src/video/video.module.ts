@@ -9,9 +9,9 @@ import { VideoJob, VideoJobSchema } from './schemas/video-job.schema';
 import { Auth0JwtGuard } from '../auth/auth0-jwt.guard';
 import { StudioModule } from '../studio/studio.module';
 import {
-  WaveUnlockPurchase,
-  WaveUnlockPurchaseSchema,
-} from '../commercial/schemas/wave-unlock-purchase.schema';
+  WaveUnlockOrder,
+  WaveUnlockOrderSchema,
+} from '../commercial/schemas/wave-unlock-order.schema';
 
 @Module({
   imports: [
@@ -19,7 +19,7 @@ import {
     StudioModule,
     MongooseModule.forFeature([
       { name: VideoJob.name, schema: VideoJobSchema },
-      { name: WaveUnlockPurchase.name, schema: WaveUnlockPurchaseSchema },
+      { name: WaveUnlockOrder.name, schema: WaveUnlockOrderSchema },
     ]),
   ],
   controllers: [VideoController],

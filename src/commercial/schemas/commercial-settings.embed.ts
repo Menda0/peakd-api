@@ -14,8 +14,13 @@ export const VolumeDiscountTierEmbedSchema =
 
 @Schema({ _id: false })
 export class CommercialSettingsEmbed {
+  /** ISO 4217 currency code stored uppercase, e.g. "EUR", "USD". */
+  @Prop({ required: true, uppercase: true })
+  currency: string;
+
+  /** Integer minor units of `currency` (e.g. cents). */
   @Prop({ required: true })
-  videoPricePeaks: number;
+  videoPriceMinor: number;
 
   @Prop({ type: [VolumeDiscountTierEmbedSchema], default: [] })
   volumeDiscounts: VolumeDiscountTierEmbed[];

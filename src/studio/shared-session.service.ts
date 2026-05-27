@@ -6,18 +6,22 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import type { SurferProfileDto } from '../feed/feed.service';
 import {
-  computeBuyClaimPeaks,
-  computeCheckoutTotal,
-  computeSponsorPeaks,
+  computeBuyClaimMinor,
+  computeCheckoutTotalMinor,
+  computeSponsorMinor,
+  PLATFORM_COMMISSION_PERCENT_DEFAULT,
   resolveEffectiveCommercialSettings,
 } from '../commercial/commercial-pricing';
 import type { CommercialSettings } from '../commercial/commercial-settings.types';
+import {
+  BILLING_CONFIG_KEY,
+  type BillingConfigValues,
+} from '../config/billing.config';
 import { PartnerProfile } from '../partner/schemas/partner-profile.schema';
 import { UserProfile } from '../users/schemas/user-profile.schema';
 import { S3Service } from '../s3/s3.service';
 import { VideoJob } from '../video/schemas/video-job.schema';
 import {
-  isSessionLocationUndisclosed,
   isUndisclosedRegionId,
   isUndisclosedSpotId,
 } from './geo-undisclosed';
@@ -45,9 +49,10 @@ export type PublicSharedSessionWaveDto = {
   surfer: SurferProfileDto | null;
   isCommercial: boolean;
   videoUnlockedByViewer: boolean;
-  wavePricePeaks: number | null;
-  buyClaimPricePeaks: number | null;
-  sponsorPricePeaks: number | null;
+  currency: string | null;
+  wavePriceMinor: number | null;
+  buyClaimPriceMinor: number | null;
+  sponsorPriceMinor: number | null;
   canBuyClaim: boolean;
   canSponsor: boolean;
   claimedByViewer: boolean;
@@ -203,6 +208,13 @@ export class SharedSessionService {
     );
   }
 
+  private commissionPercent(): number {
+    return (
+      this.config.get<BillingConfigValues>(BILLING_CONFIG_KEY)
+        ?.platformCommissionPercent ?? PLATFORM_COMMISSION_PERCENT_DEFAULT
+    );
+  }
+
   private commercialWaveExtras(
     session: SurfSession,
     partner: { commercialSettings?: CommercialSettings | null } | null,
@@ -214,9 +226,10 @@ export class SharedSessionService {
     viewerUserId: string,
   ): {
     videoUnlockedByViewer: boolean;
-    wavePricePeaks: number | null;
-    buyClaimPricePeaks: number | null;
-    sponsorPricePeaks: number | null;
+    currency: string | null;
+    wavePriceMinor: number | null;
+    buyClaimPriceMinor: number | null;
+    sponsorPriceMinor: number | null;
     canClaim: boolean;
     canBuyClaim: boolean;
     canSponsor: boolean;
@@ -234,26 +247,23 @@ export class SharedSessionService {
     const unlockedFor = doc.videoUnlockedForUserId?.trim() || null;
     const claimedBy = doc.claimedByUserId?.trim() || null;
     const videoUnlockedByViewer = unlockedFor === viewerUserId;
-    const checkoutOpts = {
-      waiveCommunityFee: isSessionLocationUndisclosed(
-        session.countryCode,
-        session.regionId,
-        session.spotId,
-      ),
-    };
-    const wavePricePeaks = settings?.videoPricePeaks ?? null;
-    const buyClaimPricePeaks = settings
-      ? computeCheckoutTotal(
-          computeBuyClaimPeaks(settings, 1).totalPeaks,
-          checkoutOpts,
-        ).totalPeaks
+    const commissionPct = this.commissionPercent();
+    const currency = settings?.currency ?? null;
+    const wavePriceMinor = settings?.videoPriceMinor ?? null;
+    const buyClaimPriceMinor = settings
+      ? computeCheckoutTotalMinor(
+          computeBuyClaimMinor(settings, 1).totalMinor,
+          commissionPct,
+        ).totalMinor
       : null;
-    const sponsorPricePeaks = settings
-      ? computeCheckoutTotal(computeSponsorPeaks(settings, 1), checkoutOpts)
-          .totalPeaks
+    const sponsorPriceMinor = settings
+      ? computeCheckoutTotalMinor(
+          computeSponsorMinor(settings, 1),
+          commissionPct,
+        ).totalMinor
       : null;
     const canClaim = claimStatus === 'none' && !unlockedFor;
-    const canBuyClaim = Boolean(settings && buyClaimPricePeaks != null);
+    const canBuyClaim = Boolean(settings && buyClaimPriceMinor != null);
     const canSponsor =
       Boolean(settings) &&
       !unlockedFor &&
@@ -261,9 +271,10 @@ export class SharedSessionService {
         (Boolean(claimedBy) && claimedBy !== viewerUserId));
     return {
       videoUnlockedByViewer,
-      wavePricePeaks,
-      buyClaimPricePeaks,
-      sponsorPricePeaks,
+      currency,
+      wavePriceMinor,
+      buyClaimPriceMinor,
+      sponsorPriceMinor,
       canClaim,
       canBuyClaim,
       canSponsor,
@@ -367,9 +378,10 @@ export class SharedSessionService {
         isCommercial: false,
         snapshotUrls: thumbnailUrls,
         videoUnlockedByViewer: true,
-        wavePricePeaks: null as number | null,
-        buyClaimPricePeaks: null as number | null,
-        sponsorPricePeaks: null as number | null,
+        currency: null as string | null,
+        wavePriceMinor: null as number | null,
+        buyClaimPriceMinor: null as number | null,
+        sponsorPriceMinor: null as number | null,
         canBuyClaim: false,
         canSponsor: false,
         claimedByViewer: false,
@@ -380,9 +392,10 @@ export class SharedSessionService {
           ? this.commercialWaveExtras(session, partner, doc, viewerId)
           : {
               videoUnlockedByViewer: false,
-              wavePricePeaks: null,
-              buyClaimPricePeaks: null,
-              sponsorPricePeaks: null,
+              currency: null,
+              wavePriceMinor: null,
+              buyClaimPriceMinor: null,
+              sponsorPriceMinor: null,
               canClaim: false,
               canBuyClaim: false,
               canSponsor: false,
@@ -422,9 +435,10 @@ export class SharedSessionService {
         surfer,
         isCommercial: commercialFields.isCommercial,
         videoUnlockedByViewer: commercialFields.videoUnlockedByViewer,
-        wavePricePeaks: commercialFields.wavePricePeaks,
-        buyClaimPricePeaks: commercialFields.buyClaimPricePeaks,
-        sponsorPricePeaks: commercialFields.sponsorPricePeaks,
+        currency: commercialFields.currency,
+        wavePriceMinor: commercialFields.wavePriceMinor,
+        buyClaimPriceMinor: commercialFields.buyClaimPriceMinor,
+        sponsorPriceMinor: commercialFields.sponsorPriceMinor,
         canBuyClaim: commercialFields.canBuyClaim,
         canSponsor: commercialFields.canSponsor,
         claimedByViewer: commercialFields.claimedByViewer,
