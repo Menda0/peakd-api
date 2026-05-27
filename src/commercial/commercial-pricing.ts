@@ -1,39 +1,32 @@
 /**
- * Commercial wave-unlock pricing.
+ * Commercial wave-unlock pricing — fiat / minor-unit math.
  *
- * Money flow on a single unlock:
+ * Money flow on a single unlock (Stripe destination charge):
  *
- *   buyer pays  (basePeaks + platformRetentionPeaks)  ──┐
- *                                                       │
- *                ┌── basePeaks  →  partnerEarningsCents (EUR, withdrawable)
+ *   buyer pays  (partnerSubtotalMinor + platformCommissionMinor)
  *                │
- *                └── platformRetentionPeaks  →  burned from circulation
- *                                                (no credit to any account)
+ *                ├── partnerSubtotalMinor → transferred immediately to the
+ *                │                        partner's Stripe Connect account
+ *                │
+ *                └── platformCommissionMinor → kept on the platform balance
  *
- * The retention Peaks are deliberately *not* held as a per-region or
- * per-community liability. Their fiat equivalent sits in the platform's
- * Stripe balance and is used at the admin's discretion to fund community
- * awards, ops, infrastructure, etc. Historically this surcharge was named
- * "community fee" because that was the dominant intended use, but the
- * payout to communities has always been discretionary, not automatic.
- *
- * Field-name conventions:
- *   - `communityFeePeaks` / `communityFeePercent` — legacy field names
- *     preserved on the DB ledger + API DTOs for backwards compatibility.
- *   - `platformRetentionPeaks` / `platformRetentionPercent` — canonical
- *     names introduced alongside; new code should prefer these.
+ * The commission is a flat 20% surcharge on top of the partner-defined
+ * `videoPriceMinor` (after any volume discount). Buyer pays via Stripe
+ * Checkout; the partner share is routed at payment time.
  */
 import { BadRequestException } from '@nestjs/common';
-import type { CommercialSettings, VolumeDiscountTier } from './commercial-settings.types';
+import type {
+  CommercialSettings,
+  VolumeDiscountTier,
+} from './commercial-settings.types';
+import { isSupportedCurrency } from './commercial-settings.types';
 
 const MIN_VIDEO_PRICE = 1;
-const MAX_VIDEO_PRICE = 1_000_000;
+const MAX_VIDEO_PRICE = 100_000_000; // generous cap: 1,000,000.00 in any 2-decimal currency
 const MAX_DISCOUNT_PERCENT = 90;
 const MIN_TIER_VIDEOS = 2;
 
-export function normalizeVolumeDiscounts(
-  raw: unknown,
-): VolumeDiscountTier[] {
+export function normalizeVolumeDiscounts(raw: unknown): VolumeDiscountTier[] {
   if (!Array.isArray(raw)) return [];
   const tiers: VolumeDiscountTier[] = [];
   for (const row of raw) {
@@ -68,21 +61,29 @@ export function normalizeVolumeDiscounts(
   return unique;
 }
 
-export function parseCommercialSettings(raw: unknown): CommercialSettings | null {
+export function parseCommercialSettings(
+  raw: unknown,
+): CommercialSettings | null {
   if (raw == null) return null;
   if (typeof raw !== 'object') return null;
   const o = raw as Record<string, unknown>;
-  const videoPricePeaks = Number(o.videoPricePeaks);
+  const currencyRaw =
+    typeof o.currency === 'string' ? o.currency.toUpperCase() : '';
+  if (!currencyRaw || !isSupportedCurrency(currencyRaw)) {
+    return null;
+  }
+  const videoPriceMinor = Number(o.videoPriceMinor);
   if (
-    !Number.isFinite(videoPricePeaks) ||
-    !Number.isInteger(videoPricePeaks) ||
-    videoPricePeaks < MIN_VIDEO_PRICE ||
-    videoPricePeaks > MAX_VIDEO_PRICE
+    !Number.isFinite(videoPriceMinor) ||
+    !Number.isInteger(videoPriceMinor) ||
+    videoPriceMinor < MIN_VIDEO_PRICE ||
+    videoPriceMinor > MAX_VIDEO_PRICE
   ) {
     return null;
   }
   return {
-    videoPricePeaks,
+    currency: currencyRaw,
+    videoPriceMinor,
     volumeDiscounts: normalizeVolumeDiscounts(o.volumeDiscounts),
   };
 }
@@ -105,7 +106,10 @@ export function validateCommercialSettings(
 }
 
 export function resolveEffectiveCommercialSettings(
-  session: { commercialSettings?: CommercialSettings | null; isCommercial?: boolean },
+  session: {
+    commercialSettings?: CommercialSettings | null;
+    isCommercial?: boolean;
+  },
   partner: { commercialSettings?: CommercialSettings | null } | null,
 ): CommercialSettings | null {
   if (!session.isCommercial) return null;
@@ -131,117 +135,83 @@ export function volumeDiscountPercent(
   return best;
 }
 
-export function computeBuyClaimPeaks(
+export function computeBuyClaimMinor(
   settings: CommercialSettings,
   quantity: number,
-): { unitPricePeaks: number; discountPercent: number; totalPeaks: number } {
+): {
+  unitPriceMinor: number;
+  discountPercent: number;
+  totalMinor: number;
+} {
   const q = Math.max(1, Math.floor(quantity));
-  const unitPricePeaks = settings.videoPricePeaks;
+  const unitPriceMinor = settings.videoPriceMinor;
   const discountPercent = volumeDiscountPercent(q, settings.volumeDiscounts);
-  const subtotal = unitPricePeaks * q;
-  const totalPeaks = Math.max(
+  const subtotal = unitPriceMinor * q;
+  const totalMinor = Math.max(
     1,
     Math.round(subtotal * (1 - discountPercent / 100)),
   );
-  return { unitPricePeaks, discountPercent, totalPeaks };
+  return { unitPriceMinor, discountPercent, totalMinor };
 }
 
-export function computeSponsorPeaks(
+export function computeSponsorMinor(
   settings: CommercialSettings,
   quantity = 1,
 ): number {
   const q = Math.max(1, Math.floor(quantity));
-  return settings.videoPricePeaks * q;
+  return settings.videoPriceMinor * q;
 }
 
 /**
- * Surcharge percent the platform retains on each wave unlock, on top of the
- * `basePeaks` price that's converted into partner earnings.
- *
- * Policy: this Peaks amount is debited from the buyer at unlock time but
- * **credited to nobody** — the fiat equivalent stays in the platform's
- * Stripe balance as operational retention. It is used at the admin's
- * discretion to fund community / region awards, but it is *not* held as a
- * per-region liability and no automatic payout pipeline drains it.
- *
- * The legacy name `COMMUNITY_FEE_PERCENT` is preserved as an alias so
- * existing imports continue to compile during the rename.
+ * Flat platform commission percent charged on top of the partner's
+ * `videoPriceMinor` (after volume discount) at checkout. Paid by the buyer,
+ * kept by the platform.
  */
-export const PLATFORM_RETENTION_PERCENT = 20;
+export const PLATFORM_COMMISSION_PERCENT_DEFAULT = 20;
 
-/** @deprecated Use {@link PLATFORM_RETENTION_PERCENT}. */
-export const COMMUNITY_FEE_PERCENT = PLATFORM_RETENTION_PERCENT;
-
-export type CheckoutPeaksBreakdown = {
-  basePeaks: number;
-  /** Legacy field — same value as `platformRetentionPeaks`. */
-  communityFeePeaks: number;
-  /** Canonical name for the retention Peaks. Equal to `communityFeePeaks`. */
-  platformRetentionPeaks: number;
-  totalPeaks: number;
-  /** Legacy field — same value as `platformRetentionPercent`. */
-  communityFeePercent: number;
-  platformRetentionPercent: number;
+export type CheckoutBreakdownMinor = {
+  basePriceMinor: number;
+  commissionMinor: number;
+  totalMinor: number;
+  commissionPercent: number;
 };
 
-export type CheckoutOptions = {
-  /**
-   * When true, no platform retention is charged (undisclosed locations).
-   * Historically named `waiveCommunityFee` — kept as the field name for
-   * backwards compatibility with existing call sites.
-   */
-  waiveCommunityFee?: boolean;
-};
-
-export function computeCheckoutTotal(
-  basePeaks: number,
-  options?: CheckoutOptions,
-): CheckoutPeaksBreakdown {
-  const base = Math.max(0, Math.round(basePeaks));
-  if (options?.waiveCommunityFee) {
-    return {
-      basePeaks: base,
-      communityFeePeaks: 0,
-      platformRetentionPeaks: 0,
-      totalPeaks: base,
-      communityFeePercent: PLATFORM_RETENTION_PERCENT,
-      platformRetentionPercent: PLATFORM_RETENTION_PERCENT,
-    };
-  }
-  const retentionPeaks = Math.max(
-    1,
-    Math.round((base * PLATFORM_RETENTION_PERCENT) / 100),
-  );
+export function computeCheckoutTotalMinor(
+  basePriceMinor: number,
+  commissionPercent: number = PLATFORM_COMMISSION_PERCENT_DEFAULT,
+): CheckoutBreakdownMinor {
+  const base = Math.max(0, Math.round(basePriceMinor));
+  const pct = Math.max(0, commissionPercent);
+  const commission = base > 0
+    ? Math.max(1, Math.round((base * pct) / 100))
+    : 0;
   return {
-    basePeaks: base,
-    communityFeePeaks: retentionPeaks,
-    platformRetentionPeaks: retentionPeaks,
-    totalPeaks: base + retentionPeaks,
-    communityFeePercent: PLATFORM_RETENTION_PERCENT,
-    platformRetentionPercent: PLATFORM_RETENTION_PERCENT,
+    basePriceMinor: base,
+    commissionMinor: commission,
+    totalMinor: base + commission,
+    commissionPercent: pct,
   };
 }
 
-export type CheckoutBreakdownWithDiscount = CheckoutPeaksBreakdown & {
-  listPricePeaks: number;
+export type CheckoutBreakdownWithDiscountMinor = CheckoutBreakdownMinor & {
+  listPriceMinor: number;
   discountPercent: number;
-  discountPeaksSaved: number;
+  discountSavedMinor: number;
 };
 
-export function checkoutBreakdownWithDiscount(
-  basePeaks: number,
-  listPricePeaks: number,
+export function checkoutBreakdownWithDiscountMinor(
+  basePriceMinor: number,
+  listPriceMinor: number,
   discountPercent: number,
-  options?: CheckoutOptions,
-): CheckoutBreakdownWithDiscount {
-  const checkout = computeCheckoutTotal(basePeaks, options);
-  const list = Math.max(0, Math.round(listPricePeaks));
-  const base = Math.max(0, Math.round(basePeaks));
+  commissionPercent: number = PLATFORM_COMMISSION_PERCENT_DEFAULT,
+): CheckoutBreakdownWithDiscountMinor {
+  const checkout = computeCheckoutTotalMinor(basePriceMinor, commissionPercent);
+  const list = Math.max(0, Math.round(listPriceMinor));
   return {
     ...checkout,
-    listPricePeaks: list,
+    listPriceMinor: list,
     discountPercent: Math.max(0, Math.round(discountPercent)),
-    discountPeaksSaved: Math.max(0, list - base),
+    discountSavedMinor: Math.max(0, list - checkout.basePriceMinor),
   };
 }
 
@@ -261,24 +231,27 @@ export function splitIntegerTotal(total: number, parts: number): number[] {
 }
 
 /**
- * Per-wave checkout lines for buy & claim when purchasing `waveCount` waves from the
- * same session (volume discount applies to the batch count).
+ * Per-wave checkout lines for buy & claim when purchasing `waveCount` waves
+ * from the same session (volume discount applies to the batch count).
  */
-export function allocateBuyClaimLineBreakdowns(
+export function allocateBuyClaimLineBreakdownsMinor(
   settings: CommercialSettings,
   waveCount: number,
-  options?: CheckoutOptions,
-): CheckoutBreakdownWithDiscount[] {
+  commissionPercent: number = PLATFORM_COMMISSION_PERCENT_DEFAULT,
+): CheckoutBreakdownWithDiscountMinor[] {
   const q = Math.max(1, Math.floor(waveCount));
-  const { unitPricePeaks, discountPercent, totalPeaks: discountedBaseTotal } =
-    computeBuyClaimPeaks(settings, q);
+  const {
+    unitPriceMinor,
+    discountPercent,
+    totalMinor: discountedBaseTotal,
+  } = computeBuyClaimMinor(settings, q);
   const baseShares = splitIntegerTotal(discountedBaseTotal, q);
-  return baseShares.map((basePeaks) =>
-    checkoutBreakdownWithDiscount(
-      basePeaks,
-      unitPricePeaks,
+  return baseShares.map((basePriceMinor) =>
+    checkoutBreakdownWithDiscountMinor(
+      basePriceMinor,
+      unitPriceMinor,
       discountPercent,
-      options,
+      commissionPercent,
     ),
   );
 }

@@ -18,7 +18,6 @@ export interface UserProfileResponseDto {
   homeRegionName: string | null;
   surfLevel: SurfLevel | null;
   avatarUrl: string | null;
-  peaksBalance: number;
 }
 
 export interface UserProfilePatchBody {
@@ -112,7 +111,6 @@ export class UserProfileService {
     homeRegionId: string | null;
     surfLevel: string | null;
     avatarKey?: string | null;
-    peaksBalance?: number | null;
   }): Promise<UserProfileResponseDto> {
     const sl = doc.surfLevel;
     const surfLevel =
@@ -129,7 +127,6 @@ export class UserProfileService {
       ),
       surfLevel,
       avatarUrl: await this.resolveAvatarUrl(avatarKey),
-      peaksBalance: Math.max(0, doc.peaksBalance ?? 0),
     };
   }
 
@@ -144,7 +141,6 @@ export class UserProfileService {
         homeRegionId: null,
         surfLevel: null,
         avatarKey: null,
-        peaksBalance: 0,
       });
       doc = await this.userProfileModel.findOne({ userId }).lean().exec();
     }
@@ -286,7 +282,6 @@ export class UserProfileService {
       homeRegionId: null,
       surfLevel: null,
       avatarKey: null,
-      peaksBalance: 0,
     };
     const setOnInsert = Object.fromEntries(
       Object.entries(defaultsOnInsert).filter(([key]) => !(key in patch)),

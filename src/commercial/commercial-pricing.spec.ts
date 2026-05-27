@@ -1,103 +1,250 @@
 import {
-  allocateBuyClaimLineBreakdowns,
-  computeBuyClaimPeaks,
-  computeCheckoutTotal,
-  computeSponsorPeaks,
+  allocateBuyClaimLineBreakdownsMinor,
+  checkoutBreakdownWithDiscountMinor,
+  computeBuyClaimMinor,
+  computeCheckoutTotalMinor,
+  computeSponsorMinor,
+  normalizeVolumeDiscounts,
+  parseCommercialSettings,
+  PLATFORM_COMMISSION_PERCENT_DEFAULT,
   resolveEffectiveCommercialSettings,
+  splitIntegerTotal,
+  validateCommercialSettings,
   volumeDiscountPercent,
 } from './commercial-pricing';
-import { DEFAULT_VOLUME_DISCOUNTS } from './commercial-settings.types';
+import type { CommercialSettings } from './commercial-settings.types';
 
-describe('commercial-pricing', () => {
-  const settings = {
-    videoPricePeaks: 100,
-    volumeDiscounts: DEFAULT_VOLUME_DISCOUNTS,
-  };
+const eur = (cents: number, volumeDiscounts: CommercialSettings['volumeDiscounts'] = []) => ({
+  currency: 'EUR',
+  videoPriceMinor: cents,
+  volumeDiscounts,
+});
 
-  it('resolves session override over partner defaults', () => {
-    const sessionOverride = { videoPricePeaks: 80, volumeDiscounts: [] };
-    const effective = resolveEffectiveCommercialSettings(
-      { isCommercial: true, commercialSettings: sessionOverride },
-      { commercialSettings: settings },
-    );
-    expect(effective?.videoPricePeaks).toBe(80);
+describe('parseCommercialSettings', () => {
+  it('returns null for non-objects', () => {
+    expect(parseCommercialSettings(null)).toBeNull();
+    expect(parseCommercialSettings('foo')).toBeNull();
+    expect(parseCommercialSettings(42)).toBeNull();
   });
 
-  it('falls back to partner defaults when session has no override', () => {
-    const effective = resolveEffectiveCommercialSettings(
-      { isCommercial: true, commercialSettings: null },
-      { commercialSettings: settings },
-    );
-    expect(effective?.videoPricePeaks).toBe(100);
+  it('rejects unsupported currencies', () => {
+    expect(
+      parseCommercialSettings({ currency: 'xyz', videoPriceMinor: 500 }),
+    ).toBeNull();
   });
 
+  it('rejects non-integer or negative prices', () => {
+    expect(
+      parseCommercialSettings({ currency: 'usd', videoPriceMinor: 0 }),
+    ).toBeNull();
+    expect(
+      parseCommercialSettings({ currency: 'usd', videoPriceMinor: 12.5 }),
+    ).toBeNull();
+  });
+
+  it('uppercases the currency and normalizes discounts', () => {
+    const parsed = parseCommercialSettings({
+      currency: 'eur',
+      videoPriceMinor: 500,
+      volumeDiscounts: [
+        { minVideos: 2, discountPercent: 10 },
+        { minVideos: 2, discountPercent: 30 }, // duplicate minVideos dropped
+        { minVideos: 5, discountPercent: 25 },
+        { minVideos: 1, discountPercent: 50 }, // below min tier — dropped
+      ],
+    });
+    expect(parsed).toEqual({
+      currency: 'EUR',
+      videoPriceMinor: 500,
+      volumeDiscounts: [
+        { minVideos: 2, discountPercent: 10 },
+        { minVideos: 5, discountPercent: 25 },
+      ],
+    });
+  });
+});
+
+describe('validateCommercialSettings', () => {
+  it('throws if required and missing', () => {
+    expect(() =>
+      validateCommercialSettings(null, { required: true }),
+    ).toThrow(/required/i);
+  });
+
+  it('throws if invalid', () => {
+    expect(() =>
+      validateCommercialSettings({
+        currency: 'EUR',
+        videoPriceMinor: -1,
+        volumeDiscounts: [],
+      }),
+    ).toThrow(/invalid/i);
+  });
+
+  it('returns parsed settings when valid', () => {
+    const result = validateCommercialSettings({
+      currency: 'eur',
+      videoPriceMinor: 500,
+      volumeDiscounts: [],
+    });
+    expect(result?.currency).toBe('EUR');
+  });
+});
+
+describe('resolveEffectiveCommercialSettings', () => {
   it('returns null when session is not commercial', () => {
-    const effective = resolveEffectiveCommercialSettings(
-      { isCommercial: false, commercialSettings: settings },
-      { commercialSettings: settings },
+    expect(
+      resolveEffectiveCommercialSettings(
+        { isCommercial: false, commercialSettings: eur(500) },
+        { commercialSettings: eur(900) },
+      ),
+    ).toBeNull();
+  });
+
+  it('prefers session override over partner default', () => {
+    const r = resolveEffectiveCommercialSettings(
+      { isCommercial: true, commercialSettings: eur(700) },
+      { commercialSettings: eur(900) },
     );
-    expect(effective).toBeNull();
+    expect(r?.videoPriceMinor).toBe(700);
   });
 
-  it('applies volume discount tiers for buy and claim', () => {
-    expect(volumeDiscountPercent(1, settings.volumeDiscounts)).toBe(0);
-    expect(volumeDiscountPercent(3, settings.volumeDiscounts)).toBe(10);
-    expect(volumeDiscountPercent(10, settings.volumeDiscounts)).toBe(20);
-    const priced = computeBuyClaimPeaks(settings, 10);
-    expect(priced.discountPercent).toBe(20);
-    expect(priced.totalPeaks).toBe(800);
+  it('falls back to partner default', () => {
+    const r = resolveEffectiveCommercialSettings(
+      { isCommercial: true, commercialSettings: null },
+      { commercialSettings: eur(900) },
+    );
+    expect(r?.videoPriceMinor).toBe(900);
+  });
+});
+
+describe('normalizeVolumeDiscounts', () => {
+  it('clamps obviously bogus rows', () => {
+    expect(
+      normalizeVolumeDiscounts([
+        { minVideos: 2, discountPercent: 10 },
+        { minVideos: 2, discountPercent: 0 },
+        { minVideos: 'bad', discountPercent: 30 },
+        { minVideos: 4, discountPercent: 91 }, // > MAX_DISCOUNT_PERCENT
+        { minVideos: 4, discountPercent: 20 },
+        null,
+      ]),
+    ).toEqual([
+      { minVideos: 2, discountPercent: 10 },
+      { minVideos: 4, discountPercent: 20 },
+    ]);
+  });
+});
+
+describe('volumeDiscountPercent', () => {
+  it('picks the highest tier applicable to the quantity', () => {
+    const tiers = [
+      { minVideos: 2, discountPercent: 10 },
+      { minVideos: 5, discountPercent: 25 },
+      { minVideos: 10, discountPercent: 40 },
+    ];
+    expect(volumeDiscountPercent(1, tiers)).toBe(0);
+    expect(volumeDiscountPercent(2, tiers)).toBe(10);
+    expect(volumeDiscountPercent(4, tiers)).toBe(10);
+    expect(volumeDiscountPercent(5, tiers)).toBe(25);
+    expect(volumeDiscountPercent(9, tiers)).toBe(25);
+    expect(volumeDiscountPercent(10, tiers)).toBe(40);
+    expect(volumeDiscountPercent(1000, tiers)).toBe(40);
+  });
+});
+
+describe('computeBuyClaimMinor', () => {
+  it('returns the unit price for quantity 1', () => {
+    const r = computeBuyClaimMinor(eur(500), 1);
+    expect(r).toEqual({
+      unitPriceMinor: 500,
+      discountPercent: 0,
+      totalMinor: 500,
+    });
   });
 
-  it('charges full price per wave for sponsor without tiers', () => {
-    expect(computeSponsorPeaks(settings, 1)).toBe(100);
-    expect(computeSponsorPeaks(settings, 2)).toBe(200);
+  it('applies the best applicable discount', () => {
+    const r = computeBuyClaimMinor(
+      eur(500, [{ minVideos: 3, discountPercent: 20 }]),
+      3,
+    );
+    expect(r.discountPercent).toBe(20);
+    expect(r.totalMinor).toBe(Math.round(500 * 3 * 0.8));
   });
 
-  it('allocates per-wave lines that sum to session buy-claim total', () => {
-    const lines = allocateBuyClaimLineBreakdowns(settings, 3);
+  it('never drops below 1 minor unit', () => {
+    const r = computeBuyClaimMinor(
+      eur(1, [{ minVideos: 2, discountPercent: 90 }]),
+      2,
+    );
+    expect(r.totalMinor).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('computeSponsorMinor', () => {
+  it('uses the list price times quantity, no discount', () => {
+    expect(computeSponsorMinor(eur(500))).toBe(500);
+    expect(computeSponsorMinor(eur(500), 3)).toBe(1500);
+    expect(computeSponsorMinor(eur(500), 0)).toBe(500); // floor at 1
+  });
+});
+
+describe('computeCheckoutTotalMinor', () => {
+  it('defaults to 20% commission', () => {
+    const r = computeCheckoutTotalMinor(1000);
+    expect(r.commissionPercent).toBe(PLATFORM_COMMISSION_PERCENT_DEFAULT);
+    expect(r.basePriceMinor).toBe(1000);
+    expect(r.commissionMinor).toBe(200);
+    expect(r.totalMinor).toBe(1200);
+  });
+
+  it('rounds commission to at least 1 minor unit on positive bases', () => {
+    const r = computeCheckoutTotalMinor(3, 20);
+    // 3 * 0.2 = 0.6 → rounds to 1
+    expect(r.commissionMinor).toBe(1);
+    expect(r.totalMinor).toBe(4);
+  });
+
+  it('charges no commission for zero base', () => {
+    const r = computeCheckoutTotalMinor(0);
+    expect(r.commissionMinor).toBe(0);
+    expect(r.totalMinor).toBe(0);
+  });
+});
+
+describe('checkoutBreakdownWithDiscountMinor', () => {
+  it('surfaces discount savings vs the list price', () => {
+    const r = checkoutBreakdownWithDiscountMinor(800, 1000, 20, 20);
+    expect(r.basePriceMinor).toBe(800);
+    expect(r.listPriceMinor).toBe(1000);
+    expect(r.discountPercent).toBe(20);
+    expect(r.discountSavedMinor).toBe(200);
+    expect(r.commissionMinor).toBe(160);
+    expect(r.totalMinor).toBe(960);
+  });
+});
+
+describe('splitIntegerTotal', () => {
+  it('distributes remainders to the first slots', () => {
+    expect(splitIntegerTotal(10, 3)).toEqual([4, 3, 3]);
+    expect(splitIntegerTotal(11, 3)).toEqual([4, 4, 3]);
+    expect(splitIntegerTotal(0, 5)).toEqual([0, 0, 0, 0, 0]);
+  });
+});
+
+describe('allocateBuyClaimLineBreakdownsMinor', () => {
+  it('returns one line per wave whose bases sum to the discounted total', () => {
+    const settings = eur(700, [{ minVideos: 3, discountPercent: 15 }]);
+    const lines = allocateBuyClaimLineBreakdownsMinor(settings, 3);
     expect(lines).toHaveLength(3);
-    expect(lines[0]?.discountPercent).toBe(10);
-    expect(lines.every((l) => l.listPricePeaks === 100)).toBe(true);
-    const baseSum = lines.reduce((s, l) => s + l.basePeaks, 0);
-    expect(baseSum).toBe(270);
-    const totalSum = lines.reduce((s, l) => s + l.totalPeaks, 0);
-    expect(totalSum).toBeGreaterThan(baseSum);
-  });
-
-  it('adds 20% platform retention (legacy: community fee) on checkout total', () => {
-    expect(computeCheckoutTotal(50)).toEqual({
-      basePeaks: 50,
-      communityFeePeaks: 10,
-      platformRetentionPeaks: 10,
-      totalPeaks: 60,
-      communityFeePercent: 20,
-      platformRetentionPercent: 20,
-    });
-  });
-
-  it('waives platform retention for undisclosed locations', () => {
-    expect(computeCheckoutTotal(50, { waiveCommunityFee: true })).toEqual({
-      basePeaks: 50,
-      communityFeePeaks: 0,
-      platformRetentionPeaks: 0,
-      totalPeaks: 50,
-      communityFeePercent: 20,
-      platformRetentionPercent: 20,
-    });
-    const lines = allocateBuyClaimLineBreakdowns(settings, 2, {
-      waiveCommunityFee: true,
-    });
-    expect(lines.every((l) => l.communityFeePeaks === 0)).toBe(true);
-    expect(lines.reduce((s, l) => s + l.totalPeaks, 0)).toBe(
-      lines.reduce((s, l) => s + l.basePeaks, 0),
-    );
-  });
-
-  it('dual-writes platformRetentionPeaks alongside communityFeePeaks', () => {
-    const breakdown = computeCheckoutTotal(100);
-    expect(breakdown.communityFeePeaks).toBe(breakdown.platformRetentionPeaks);
-    expect(breakdown.communityFeePercent).toBe(
-      breakdown.platformRetentionPercent,
-    );
+    const baseSum = lines.reduce((s, l) => s + l.basePriceMinor, 0);
+    expect(baseSum).toBe(Math.round(700 * 3 * 0.85));
+    for (const line of lines) {
+      expect(line.commissionPercent).toBe(PLATFORM_COMMISSION_PERCENT_DEFAULT);
+      expect(line.discountPercent).toBe(15);
+      expect(line.listPriceMinor).toBe(700);
+      expect(line.commissionMinor).toBeGreaterThanOrEqual(1);
+      expect(line.totalMinor).toBe(line.basePriceMinor + line.commissionMinor);
+    }
   });
 });

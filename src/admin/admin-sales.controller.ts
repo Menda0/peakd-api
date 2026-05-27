@@ -1,18 +1,19 @@
 import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { Auth0AdminGuard } from '../auth/auth0-admin.guard';
-import { AdminPeaksService } from './admin-peaks.service';
+import { AdminSalesService } from './admin-sales.service';
 
-@Controller('admin/peaks')
+@Controller('admin/sales')
 @UseGuards(Auth0AdminGuard)
-export class AdminPeaksController {
-  constructor(private readonly peaks: AdminPeaksService) {}
+export class AdminSalesController {
+  constructor(private readonly sales: AdminSalesService) {}
 
   @Get('summary')
   getSummary(
     @Query('countryCode') countryCode?: string,
     @Query('regionId') regionId?: string,
+    @Query('currency') currency?: string,
   ) {
-    return this.peaks.getSummary({ countryCode, regionId });
+    return this.sales.getSummary({ countryCode, regionId, currency });
   }
 
   @Get('transactions')
@@ -21,13 +22,15 @@ export class AdminPeaksController {
     @Query('cursor') cursor?: string,
     @Query('countryCode') countryCode?: string,
     @Query('regionId') regionId?: string,
+    @Query('currency') currency?: string,
   ) {
     const parsedLimit = limit != null ? Number(limit) : undefined;
-    return this.peaks.listTransactions({
+    return this.sales.listTransactions({
       limit: Number.isFinite(parsedLimit) ? parsedLimit : undefined,
       cursor,
       countryCode,
       regionId,
+      currency,
     });
   }
 
@@ -35,18 +38,20 @@ export class AdminPeaksController {
   listByCountry(
     @Query('countryCode') countryCode?: string,
     @Query('regionId') regionId?: string,
+    @Query('currency') currency?: string,
   ) {
-    return this.peaks.listByCountry({ countryCode, regionId });
+    return this.sales.listByCountry({ countryCode, regionId, currency });
   }
 
   @Get('by-region')
   listByRegion(
     @Query('countryCode') countryCode?: string,
     @Query('regionId') regionId?: string,
+    @Query('currency') currency?: string,
   ) {
     if (!countryCode?.trim()) {
-      return this.peaks.listAllByRegion();
+      return this.sales.listAllByRegion();
     }
-    return this.peaks.listByRegion(countryCode, { regionId });
+    return this.sales.listByRegion(countryCode, { regionId, currency });
   }
 }
