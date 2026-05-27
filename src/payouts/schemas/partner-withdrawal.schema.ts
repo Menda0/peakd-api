@@ -23,11 +23,12 @@ export class PartnerWithdrawal {
   @Prop({ required: true, index: true })
   stripeAccountId: string;
 
-  /** EUR cents transferred to the connected account. */
+  /** Amount transferred, in integer minor units of `currency`. */
   @Prop({ required: true })
-  amountCents: number;
+  amountMinor: number;
 
-  @Prop({ required: true, default: 'eur' })
+  /** ISO 4217 currency, lowercase (Stripe convention). */
+  @Prop({ required: true })
   currency: string;
 
   /**
@@ -58,3 +59,4 @@ export const PartnerWithdrawalSchema =
   SchemaFactory.createForClass(PartnerWithdrawal);
 
 PartnerWithdrawalSchema.index({ userId: 1, createdAt: -1 });
+PartnerWithdrawalSchema.index({ userId: 1, currency: 1, createdAt: -1 });

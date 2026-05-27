@@ -8,9 +8,7 @@ import { Model } from 'mongoose';
 import { validate as uuidValidate, version as uuidVersion } from 'uuid';
 import { S3Service } from '../s3/s3.service';
 import { StudioService } from '../studio/studio.service';
-import {
-  WaveUnlockPurchase,
-} from '../commercial/schemas/wave-unlock-purchase.schema';
+import { WaveUnlockOrder } from '../commercial/schemas/wave-unlock-order.schema';
 import { VideoJob } from './schemas/video-job.schema';
 import type { VideoJobStatus } from './schemas/video-job.schema';
 
@@ -62,8 +60,8 @@ export class VideoRegistryService {
     private readonly studio: StudioService,
     @InjectModel(VideoJob.name)
     private readonly videoJobModel: Model<VideoJob>,
-    @InjectModel(WaveUnlockPurchase.name)
-    private readonly waveUnlockPurchaseModel: Model<WaveUnlockPurchase>,
+    @InjectModel(WaveUnlockOrder.name)
+    private readonly waveUnlockOrderModel: Model<WaveUnlockOrder>,
   ) {}
 
   async listJobs(
@@ -218,7 +216,12 @@ export class VideoRegistryService {
       this.s3.deletePrefixRaw(prefix),
     ]);
 
-    await this.waveUnlockPurchaseModel.deleteMany({ jobId }).exec();
+    // Best-effort: remove any wave_unlock_orders that reference this job. In
+    // the new model these are per-checkout-session and may include unrelated
+    // jobs, so we pull just this jobId out rather than deleting whole orders.
+    await this.waveUnlockOrderModel
+      .updateMany({ jobIds: jobId }, { $pull: { jobIds: jobId } })
+      .exec();
     await this.videoJobModel.deleteOne({ jobId, userId }).exec();
 
     return { jobId };

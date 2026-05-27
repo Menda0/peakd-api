@@ -34,11 +34,14 @@ export class PartnerProfile {
   @Prop({ type: String, default: null })
   countryCode: string | null;
 
-  /** Default Peaks pricing for commercial studio sessions. */
+  /**
+   * Default commercial pricing — currency + minor-unit price + volume
+   * discounts. Required before a partner can mark a session as commercial.
+   */
   @Prop({ type: CommercialSettingsEmbedSchema, default: null })
   commercialSettings: CommercialSettingsEmbed | null;
 
-  /** Stripe Connect account id (`acct_...`) used to receive bank payouts. */
+  /** Stripe Connect account id (`acct_...`) used to receive buyer payments. */
   @Prop({ type: String, default: null, index: true, sparse: true })
   stripeConnectAccountId: string | null;
 

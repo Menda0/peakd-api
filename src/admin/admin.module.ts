@@ -3,13 +3,9 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { Auth0AdminGuard } from '../auth/auth0-admin.guard';
 import { Auth0JwtGuard } from '../auth/auth0-jwt.guard';
 import {
-  PeakPurchase,
-  PeakPurchaseSchema,
-} from '../billing/schemas/peak-purchase.schema';
-import {
-  WaveUnlockPurchase,
-  WaveUnlockPurchaseSchema,
-} from '../commercial/schemas/wave-unlock-purchase.schema';
+  WaveUnlockOrder,
+  WaveUnlockOrderSchema,
+} from '../commercial/schemas/wave-unlock-order.schema';
 import {
   PartnerWithdrawal,
   PartnerWithdrawalSchema,
@@ -17,13 +13,16 @@ import {
 import { Region, RegionSchema } from '../studio/schemas/region.schema';
 import { Spot, SpotSchema } from '../studio/schemas/spot.schema';
 import { S3Module } from '../s3/s3.module';
-import { UserProfile, UserProfileSchema } from '../users/schemas/user-profile.schema';
+import {
+  UserProfile,
+  UserProfileSchema,
+} from '../users/schemas/user-profile.schema';
 import { AdminFinanceController } from './admin-finance.controller';
 import { AdminFinanceService } from './admin-finance.service';
-import { AdminPeaksController } from './admin-peaks.controller';
-import { AdminPeaksService } from './admin-peaks.service';
 import { AdminRegionsController } from './admin-regions.controller';
 import { AdminRegionsService } from './admin-regions.service';
+import { AdminSalesController } from './admin-sales.controller';
+import { AdminSalesService } from './admin-sales.service';
 import { AdminSpotsService } from './admin-spots.service';
 
 @Module({
@@ -32,21 +31,20 @@ import { AdminSpotsService } from './admin-spots.service';
     MongooseModule.forFeature([
       { name: Region.name, schema: RegionSchema },
       { name: Spot.name, schema: SpotSchema },
-      { name: WaveUnlockPurchase.name, schema: WaveUnlockPurchaseSchema },
-      { name: PeakPurchase.name, schema: PeakPurchaseSchema },
+      { name: WaveUnlockOrder.name, schema: WaveUnlockOrderSchema },
       { name: PartnerWithdrawal.name, schema: PartnerWithdrawalSchema },
       { name: UserProfile.name, schema: UserProfileSchema },
     ]),
   ],
   controllers: [
     AdminRegionsController,
-    AdminPeaksController,
+    AdminSalesController,
     AdminFinanceController,
   ],
   providers: [
     AdminRegionsService,
     AdminSpotsService,
-    AdminPeaksService,
+    AdminSalesService,
     AdminFinanceService,
     Auth0JwtGuard,
     Auth0AdminGuard,
