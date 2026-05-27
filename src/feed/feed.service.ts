@@ -182,9 +182,9 @@ export interface DiscoverFeedItemDto {
   currency: string | null;
   /** Partner price per wave, minor units (e.g. cents). */
   wavePriceMinor: number | null;
-  /** Buy-and-claim total per wave (price + 20% commission), minor units. */
+  /** Buy-and-claim total per wave (price + commission + Stripe-fee gross-up). */
   buyClaimPriceMinor: number | null;
-  /** Sponsor total per wave (price + 20% commission), minor units. */
+  /** Sponsor total per wave (price + commission + Stripe-fee gross-up). */
   sponsorPriceMinor: number | null;
   partnerUserId: string | null;
   canClaim: boolean;
@@ -204,6 +204,7 @@ export interface SurferProfileDto {
 export interface CheckoutBreakdownDto {
   basePriceMinor: number;
   commissionMinor: number;
+  stripeProcessingFeeMinor: number;
   totalMinor: number;
   commissionPercent: number;
   listPriceMinor: number;
@@ -243,6 +244,7 @@ export interface UnlockCartQuoteLineDto {
   discountSavedMinor: number;
   basePriceMinor: number;
   commissionMinor: number;
+  stripeProcessingFeeMinor: number;
   totalMinor: number;
   commissionPercent: number;
 }
@@ -255,6 +257,7 @@ export interface UnlockCartQuoteGroupDto {
   lines: UnlockCartQuoteLineDto[];
   partnerSubtotalMinor: number;
   platformCommissionMinor: number;
+  stripeProcessingFeeMinor: number;
   totalAmountMinor: number;
   platformCommissionPercent: number;
 }
@@ -509,6 +512,17 @@ export class FeedService {
     );
   }
 
+  private stripeFeeConfig(): {
+    stripeProcessingFeePercent: number;
+    stripeProcessingFeeFixedMinor: number;
+  } {
+    const b = this.config.get<BillingConfigValues>(BILLING_CONFIG_KEY);
+    return {
+      stripeProcessingFeePercent: b?.stripeProcessingFeePercent ?? 2.9,
+      stripeProcessingFeeFixedMinor: b?.stripeProcessingFeeFixedMinor ?? 30,
+    };
+  }
+
   private commercialExtras(
     session: {
       isCommercial?: boolean;
@@ -567,18 +581,21 @@ export class FeedService {
     const claimedBy = job.claimedByUserId?.trim() || null;
     const videoUnlockedByViewer = unlockedFor === viewerUserId;
     const commissionPct = this.commissionPercent();
+    const stripeFeeConfig = this.stripeFeeConfig();
     const currency = settings?.currency ?? null;
     const wavePriceMinor = settings?.videoPriceMinor ?? null;
     const buyClaimPriceMinor = settings
       ? computeCheckoutTotalMinor(
           computeBuyClaimMinor(settings, 1).totalMinor,
           commissionPct,
+          stripeFeeConfig,
         ).totalMinor
       : null;
     const sponsorPriceMinor = settings
       ? computeCheckoutTotalMinor(
           computeSponsorMinor(settings, 1),
           commissionPct,
+          stripeFeeConfig,
         ).totalMinor
       : null;
     // The session owner (partner) can't buy or sponsor their own wave —
@@ -746,6 +763,7 @@ export class FeedService {
     const groups: UnlockCartQuoteGroupDto[] = [];
     const totalsByCurrency: Record<string, number> = {};
     const commissionPct = this.commissionPercent();
+    const stripeFeeConfig = this.stripeFeeConfig();
 
     for (const group of byPartner.values()) {
       const settings = group.items[0]!.ctx.settings;
@@ -762,6 +780,7 @@ export class FeedService {
           settings,
           buyClaimItems.length,
           commissionPct,
+          stripeFeeConfig,
         );
         for (let i = 0; i < buyClaimItems.length; i += 1) {
           const row = buyClaimItems[i]!;
@@ -779,6 +798,7 @@ export class FeedService {
             discountSavedMinor: priced.discountSavedMinor,
             basePriceMinor: priced.basePriceMinor,
             commissionMinor: priced.commissionMinor,
+            stripeProcessingFeeMinor: priced.stripeProcessingFeeMinor,
             totalMinor: priced.totalMinor,
             commissionPercent: priced.commissionPercent,
           });
@@ -789,6 +809,7 @@ export class FeedService {
         const breakdown = computeCheckoutTotalMinor(
           basePriceMinor,
           commissionPct,
+          stripeFeeConfig,
         );
         lines.push({
           jobId: row.jobId,
@@ -803,6 +824,7 @@ export class FeedService {
           discountSavedMinor: 0,
           basePriceMinor: breakdown.basePriceMinor,
           commissionMinor: breakdown.commissionMinor,
+          stripeProcessingFeeMinor: breakdown.stripeProcessingFeeMinor,
           totalMinor: breakdown.totalMinor,
           commissionPercent: breakdown.commissionPercent,
         });
@@ -816,7 +838,11 @@ export class FeedService {
         (sum, line) => sum + line.commissionMinor,
         0,
       );
-      const totalAmountMinor = partnerSubtotalMinor + platformCommissionMinor;
+      const stripeProcessingFeeMinor = lines.reduce(
+        (sum, line) => sum + line.stripeProcessingFeeMinor,
+        0,
+      );
+      const totalAmountMinor = lines.reduce((sum, line) => sum + line.totalMinor, 0);
 
       const [partnerProfile, authorProfile] = await Promise.all([
         this.partnerProfileModel
@@ -846,6 +872,7 @@ export class FeedService {
         lines,
         partnerSubtotalMinor,
         platformCommissionMinor,
+        stripeProcessingFeeMinor,
         totalAmountMinor,
         platformCommissionPercent: commissionPct,
       });
@@ -936,19 +963,23 @@ export class FeedService {
       isUndisclosedRegionId(session.regionId, countryCode) ||
       isUndisclosedSpotId(session.spotId, countryCode);
     const commissionPct = this.commissionPercent();
+    const stripeFeeConfig = this.stripeFeeConfig();
     const buyClaimQuote = computeBuyClaimMinor(settings, 1);
     const buyClaimBreakdown = computeCheckoutTotalMinor(
       buyClaimQuote.totalMinor,
       commissionPct,
+      stripeFeeConfig,
     );
     const sponsorBase = computeSponsorMinor(settings, 1);
     const sponsorBreakdown = computeCheckoutTotalMinor(
       sponsorBase,
       commissionPct,
+      stripeFeeConfig,
     );
     const buyClaim: CheckoutBreakdownDto = {
       basePriceMinor: buyClaimBreakdown.basePriceMinor,
       commissionMinor: buyClaimBreakdown.commissionMinor,
+      stripeProcessingFeeMinor: buyClaimBreakdown.stripeProcessingFeeMinor,
       totalMinor: buyClaimBreakdown.totalMinor,
       commissionPercent: buyClaimBreakdown.commissionPercent,
       listPriceMinor: settings.videoPriceMinor,
@@ -962,6 +993,7 @@ export class FeedService {
     const sponsor: CheckoutBreakdownDto = {
       basePriceMinor: sponsorBreakdown.basePriceMinor,
       commissionMinor: sponsorBreakdown.commissionMinor,
+      stripeProcessingFeeMinor: sponsorBreakdown.stripeProcessingFeeMinor,
       totalMinor: sponsorBreakdown.totalMinor,
       commissionPercent: sponsorBreakdown.commissionPercent,
       listPriceMinor: settings.videoPriceMinor,
@@ -1020,10 +1052,18 @@ export class FeedService {
         canBuyClaim: rowExtras.canBuyClaim,
         canSponsor: rowExtras.canSponsor,
         buyClaimTotalMinor: rowExtras.canBuyClaim
-          ? computeCheckoutTotalMinor(rowBuyBase, commissionPct).totalMinor
+          ? computeCheckoutTotalMinor(
+              rowBuyBase,
+              commissionPct,
+              stripeFeeConfig,
+            ).totalMinor
           : null,
         sponsorTotalMinor: rowExtras.canSponsor
-          ? computeCheckoutTotalMinor(rowSponsorBase, commissionPct).totalMinor
+          ? computeCheckoutTotalMinor(
+              rowSponsorBase,
+              commissionPct,
+              stripeFeeConfig,
+            ).totalMinor
           : null,
       });
     }

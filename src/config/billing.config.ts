@@ -8,6 +8,15 @@ export interface BillingConfigValues {
    * Paid by the buyer, kept by the platform. Default 20.
    */
   platformCommissionPercent: number;
+  /**
+   * Stripe processing percentage used to gross up checkout totals so the
+   * partner payout + platform commission remain intact after Stripe fees.
+   */
+  stripeProcessingFeePercent: number;
+  /**
+   * Stripe fixed processing fee in minor units (e.g. 30 for $0.30).
+   */
+  stripeProcessingFeeFixedMinor: number;
   stripeSecretKey: string;
   stripeWebhookSecret: string;
   /** Optional dedicated signing secret for connected-account events. Falls back to stripeWebhookSecret. */
@@ -29,6 +38,13 @@ function parseFeePercent(raw: string | undefined, fallback: number): number {
   const n = Number.parseFloat(raw);
   if (!Number.isFinite(n) || n < 0) return fallback;
   return Math.min(n, 100);
+}
+
+function parseMinorAmount(raw: string | undefined, fallback: number): number {
+  if (raw == null || raw.trim() === '') return fallback;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return n;
 }
 
 function parsePath(raw: string | undefined, fallback: string): string {
@@ -75,6 +91,14 @@ export const billingConfig = registerAs(
     platformCommissionPercent: parseFeePercent(
       process.env.PLATFORM_COMMISSION_PERCENT,
       20,
+    ),
+    stripeProcessingFeePercent: parseFeePercent(
+      process.env.STRIPE_PROCESSING_FEE_PERCENT,
+      2.9,
+    ),
+    stripeProcessingFeeFixedMinor: parseMinorAmount(
+      process.env.STRIPE_PROCESSING_FEE_FIXED_MINOR,
+      30,
     ),
     stripeSecretKey: (process.env.STRIPE_SECRET_KEY ?? '').trim(),
     stripeWebhookSecret: (process.env.STRIPE_WEBHOOK_SECRET ?? '').trim(),

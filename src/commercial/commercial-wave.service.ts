@@ -128,6 +128,17 @@ export class CommercialWaveService {
     );
   }
 
+  private stripeFeeConfig(): {
+    stripeProcessingFeePercent: number;
+    stripeProcessingFeeFixedMinor: number;
+  } {
+    const b = this.billing();
+    return {
+      stripeProcessingFeePercent: b.stripeProcessingFeePercent,
+      stripeProcessingFeeFixedMinor: b.stripeProcessingFeeFixedMinor,
+    };
+  }
+
   private isCompleted(doc: {
     status?: string;
     processedKey?: string | null;
@@ -255,21 +266,23 @@ export class CommercialWaveService {
       // makes sense as N independent sponsor charges. We collapse them into
       // a single Checkout Session with one line per wave.
       const commissionPct = this.commissionPercent();
+      const stripeFeeConfig = this.stripeFeeConfig();
       lineBreakdowns = contexts.map((ctx) => {
         const basePriceMinor = computeSponsorMinor(ctx.settings, 1);
+        const checkout = computeCheckoutTotalMinor(
+          basePriceMinor,
+          commissionPct,
+          stripeFeeConfig,
+        );
         return {
           basePriceMinor,
           listPriceMinor: ctx.settings.videoPriceMinor,
           discountPercent: 0,
           discountSavedMinor: 0,
-          commissionMinor: Math.max(
-            1,
-            Math.round((basePriceMinor * commissionPct) / 100),
-          ),
-          totalMinor:
-            basePriceMinor +
-            Math.max(1, Math.round((basePriceMinor * commissionPct) / 100)),
-          commissionPercent: commissionPct,
+          commissionMinor: checkout.commissionMinor,
+          stripeProcessingFeeMinor: checkout.stripeProcessingFeeMinor,
+          totalMinor: checkout.totalMinor,
+          commissionPercent: checkout.commissionPercent,
         };
       });
     } else {
@@ -277,6 +290,7 @@ export class CommercialWaveService {
         settings,
         ids.length,
         this.commissionPercent(),
+        this.stripeFeeConfig(),
       );
     }
 
@@ -288,7 +302,14 @@ export class CommercialWaveService {
       (sum, line) => sum + line.commissionMinor,
       0,
     );
-    const totalAmountMinor = partnerSubtotalMinor + platformCommissionMinor;
+    const totalAmountMinor = lineBreakdowns.reduce(
+      (sum, line) => sum + line.totalMinor,
+      0,
+    );
+    const applicationFeeMinor = Math.max(
+      0,
+      totalAmountMinor - partnerSubtotalMinor,
+    );
     const discountPercent =
       intent === 'buy_claim'
         ? computeBuyClaimMinor(settings, ids.length).discountPercent
@@ -350,8 +371,8 @@ export class CommercialWaveService {
     const paymentIntentData: Stripe.Checkout.SessionCreateParams.PaymentIntentData =
       {
         transfer_data: { destination: stripeConnectAccountId },
-        ...(platformCommissionMinor > 0
-          ? { application_fee_amount: platformCommissionMinor }
+        ...(applicationFeeMinor > 0
+          ? { application_fee_amount: applicationFeeMinor }
           : {}),
       };
 
@@ -670,20 +691,23 @@ export class CommercialWaveService {
   ): CheckoutBreakdownWithDiscountMinor[] {
     if (intent === 'sponsor') {
       const commissionPct = this.commissionPercent();
+      const stripeFeeConfig = this.stripeFeeConfig();
       return Array.from({ length: Math.max(1, quantity) }, () => {
         const basePriceMinor = settings.videoPriceMinor;
-        const commissionMinor = Math.max(
-          1,
-          Math.round((basePriceMinor * commissionPct) / 100),
+        const checkout = computeCheckoutTotalMinor(
+          basePriceMinor,
+          commissionPct,
+          stripeFeeConfig,
         );
         return {
           basePriceMinor,
           listPriceMinor: settings.videoPriceMinor,
           discountPercent: 0,
           discountSavedMinor: 0,
-          commissionMinor,
-          totalMinor: basePriceMinor + commissionMinor,
-          commissionPercent: commissionPct,
+          commissionMinor: checkout.commissionMinor,
+          stripeProcessingFeeMinor: checkout.stripeProcessingFeeMinor,
+          totalMinor: checkout.totalMinor,
+          commissionPercent: checkout.commissionPercent,
         };
       });
     }
@@ -691,6 +715,7 @@ export class CommercialWaveService {
       settings,
       quantity,
       this.commissionPercent(),
+      this.stripeFeeConfig(),
     );
   }
 

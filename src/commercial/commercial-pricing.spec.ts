@@ -7,6 +7,8 @@ import {
   normalizeVolumeDiscounts,
   parseCommercialSettings,
   PLATFORM_COMMISSION_PERCENT_DEFAULT,
+  STRIPE_PROCESSING_FEE_FIXED_MINOR_DEFAULT,
+  STRIPE_PROCESSING_FEE_PERCENT_DEFAULT,
   resolveEffectiveCommercialSettings,
   splitIntegerTotal,
   validateCommercialSettings,
@@ -190,25 +192,43 @@ describe('computeSponsorMinor', () => {
 });
 
 describe('computeCheckoutTotalMinor', () => {
-  it('defaults to 20% commission', () => {
+  it('defaults to 20% commission plus Stripe gross-up', () => {
     const r = computeCheckoutTotalMinor(1000);
     expect(r.commissionPercent).toBe(PLATFORM_COMMISSION_PERCENT_DEFAULT);
     expect(r.basePriceMinor).toBe(1000);
     expect(r.commissionMinor).toBe(200);
-    expect(r.totalMinor).toBe(1200);
+    expect(r.stripeProcessingFeeMinor).toBeGreaterThan(0);
+    expect(r.totalMinor).toBe(1000 + 200 + r.stripeProcessingFeeMinor);
   });
 
   it('rounds commission to at least 1 minor unit on positive bases', () => {
     const r = computeCheckoutTotalMinor(3, 20);
     // 3 * 0.2 = 0.6 → rounds to 1
     expect(r.commissionMinor).toBe(1);
-    expect(r.totalMinor).toBe(4);
+    expect(r.totalMinor).toBeGreaterThanOrEqual(4);
   });
 
   it('charges no commission for zero base', () => {
     const r = computeCheckoutTotalMinor(0);
     expect(r.commissionMinor).toBe(0);
     expect(r.totalMinor).toBe(0);
+  });
+
+  it('can disable Stripe gross-up via config', () => {
+    const r = computeCheckoutTotalMinor(1000, 20, {
+      stripeProcessingFeePercent: 0,
+      stripeProcessingFeeFixedMinor: 0,
+    });
+    expect(r.commissionMinor).toBe(200);
+    expect(r.stripeProcessingFeeMinor).toBe(0);
+    expect(r.totalMinor).toBe(1200);
+  });
+
+  it('uses default Stripe fee constants', () => {
+    const r = computeCheckoutTotalMinor(1000);
+    expect(STRIPE_PROCESSING_FEE_PERCENT_DEFAULT).toBe(2.9);
+    expect(STRIPE_PROCESSING_FEE_FIXED_MINOR_DEFAULT).toBe(30);
+    expect(r.stripeProcessingFeeMinor).toBeGreaterThan(0);
   });
 });
 
@@ -220,7 +240,7 @@ describe('checkoutBreakdownWithDiscountMinor', () => {
     expect(r.discountPercent).toBe(20);
     expect(r.discountSavedMinor).toBe(200);
     expect(r.commissionMinor).toBe(160);
-    expect(r.totalMinor).toBe(960);
+    expect(r.totalMinor).toBe(800 + 160 + r.stripeProcessingFeeMinor);
   });
 });
 
@@ -244,7 +264,11 @@ describe('allocateBuyClaimLineBreakdownsMinor', () => {
       expect(line.discountPercent).toBe(15);
       expect(line.listPriceMinor).toBe(700);
       expect(line.commissionMinor).toBeGreaterThanOrEqual(1);
-      expect(line.totalMinor).toBe(line.basePriceMinor + line.commissionMinor);
+      expect(line.totalMinor).toBe(
+        line.basePriceMinor +
+          line.commissionMinor +
+          line.stripeProcessingFeeMinor,
+      );
     }
   });
 });

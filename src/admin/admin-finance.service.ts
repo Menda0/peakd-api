@@ -35,7 +35,7 @@ export type AdminFinanceCurrencyRowDto = {
     totalStripeFeesMinor: number;
     /** Lifetime sum of `partnerSubtotalMinor` (transferred to partners at checkout). */
     totalPartnerSubtotalMinor: number;
-    /** Lifetime platform commission earned (disclosed regions only). */
+    /** Lifetime platform fees earned (commission + Stripe-fee recovery). */
     totalPlatformCommissionMinor: number;
     /** Count of completed orders. */
     totalOrders: number;
@@ -123,7 +123,7 @@ export class AdminFinanceService {
         balanceSnapshot.availableByCurrency.get(cur) ?? 0;
       const pendingMinor = balanceSnapshot.pendingByCurrency.get(cur) ?? 0;
       // Partners are paid via destination charges at checkout — no internal
-      // liability bucket. Platform margin is commission minus Stripe fees.
+      // liability bucket. Platform margin is (app fee on charge) minus Stripe fees.
       const netPlatformMarginMinor =
         r.totalPlatformCommissionMinor - r.totalStripeFeesMinor;
       rows.push({
@@ -202,7 +202,12 @@ export class AdminFinanceService {
                     },
                   },
                   0,
-                  { $ifNull: ['$platformCommissionMinor', 0] },
+                  {
+                    $subtract: [
+                      { $ifNull: ['$totalAmountMinor', 0] },
+                      { $ifNull: ['$partnerSubtotalMinor', 0] },
+                    ],
+                  },
                 ],
               },
             },
