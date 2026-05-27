@@ -2,9 +2,9 @@ import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { Auth0JwtGuard } from '../auth/auth0-jwt.guard';
 import {
-  WaveUnlockPurchase,
-  WaveUnlockPurchaseSchema,
-} from '../commercial/schemas/wave-unlock-purchase.schema';
+  WaveUnlockOrder,
+  WaveUnlockOrderSchema,
+} from '../commercial/schemas/wave-unlock-order.schema';
 import {
   PartnerProfile,
   PartnerProfileSchema,
@@ -30,7 +30,7 @@ import {
       { name: UserProfile.name, schema: UserProfileSchema },
       { name: PartnerProfile.name, schema: PartnerProfileSchema },
       { name: PartnerWithdrawal.name, schema: PartnerWithdrawalSchema },
-      { name: WaveUnlockPurchase.name, schema: WaveUnlockPurchaseSchema },
+      { name: WaveUnlockOrder.name, schema: WaveUnlockOrderSchema },
       { name: VideoJob.name, schema: VideoJobSchema },
     ]),
   ],

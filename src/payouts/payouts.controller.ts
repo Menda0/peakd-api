@@ -1,6 +1,4 @@
 import {
-  BadRequestException,
-  Body,
   Controller,
   Get,
   Post,
@@ -13,8 +11,7 @@ import { PayoutsService } from './payouts.service';
 
 /**
  * Partner-only UX is enforced in Next.js (mirrors PartnersController). The API
- * scopes everything by the authenticated `sub`, so a non-partner with a valid
- * token sees zero earnings and cannot withdraw.
+ * scopes everything by the authenticated `sub`.
  */
 @Controller('partners/me/payouts')
 @UseGuards(Auth0JwtGuard)
@@ -42,18 +39,5 @@ export class PayoutsController {
   @Post('onboarding-link')
   onboardingLink(@AuthUserId() userId: string) {
     return this.payouts.createOnboardingLink(userId);
-  }
-
-  @Post('withdraw')
-  withdraw(
-    @AuthUserId() userId: string,
-    @Body() body: { amountCents?: unknown },
-  ) {
-    const raw = body?.amountCents;
-    const amountCents = typeof raw === 'number' ? raw : Number(raw);
-    if (!Number.isFinite(amountCents) || amountCents <= 0) {
-      throw new BadRequestException('amountCents must be a positive number');
-    }
-    return this.payouts.requestWithdrawal(userId, Math.floor(amountCents));
   }
 }

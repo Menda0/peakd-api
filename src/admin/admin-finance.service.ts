@@ -11,115 +11,71 @@ import {
   BILLING_CONFIG_KEY,
   type BillingConfigValues,
 } from '../config/billing.config';
-import { WaveUnlockPurchase } from '../commercial/schemas/wave-unlock-purchase.schema';
-import { PeakPurchase } from '../billing/schemas/peak-purchase.schema';
-import { PartnerWithdrawal } from '../payouts/schemas/partner-withdrawal.schema';
+import { WaveUnlockOrder } from '../commercial/schemas/wave-unlock-order.schema';
 import { UNDISCLOSED_REGION_ID_PATTERN } from '../studio/geo-undisclosed';
-import { UserProfile } from '../users/schemas/user-profile.schema';
 
 /**
- * Snapshot of the platform's financial state, denominated in EUR cents.
+ * Snapshot of the platform's financial state, split per settlement currency.
  *
- * All `*Cents` fields are EUR cents and the `peaksPerEuro` field gives the
- * conversion factor for Peaks-denominated totals (`*Peaks`).
+ * Every `*Minor` field is an integer in the minor unit of the row's
+ * `currency`. The dashboard renders one card per currency.
  */
-export type AdminFinanceOverviewDto = {
-  /** ISO timestamp of the snapshot. */
-  fetchedAt: string;
-  peaksPerEuro: number;
+export type AdminFinanceCurrencyRowDto = {
+  /** ISO 4217 currency code (uppercase for partner-facing, lowercase for stripe). */
+  currency: string;
   stripe: {
-    /**
-     * Funds Stripe has cleared into the platform's EUR balance and are
-     * available to fund `transfers.create` calls right now.
-     */
-    availableEurCents: number;
-    /**
-     * Funds that have been charged but not yet cleared into the available
-     * balance. New accounts typically see a 7-day pending window.
-     */
-    pendingEurCents: number;
-    /** ISO codes of any non-EUR balances present (FX exposure check). */
-    nonEurCurrencies: string[];
-    /** Null if Stripe was unreachable; in that case the UI shows a warning. */
+    availableMinor: number;
+    pendingMinor: number;
     error: string | null;
   };
   ledger: {
-    /** Lifetime gross revenue from completed Peak-pack purchases (`totalAmountCents`). */
-    totalRevenueCents: number;
-    /**
-     * Lifetime Stripe processing fees taken on completed Peak-pack
-     * purchases. Only counts rows where `stripeFeeCents` was successfully
-     * captured at webhook time (older rows pre-A1 are skipped).
-     */
-    totalStripeFeesCents: number;
-    /** Count of `PeakPurchase` rows where `stripeFeeCents` is non-null. */
-    purchasesWithFeeData: number;
-    /** Count of completed purchases overall (regardless of fee data). */
-    totalPurchases: number;
-    /**
-     * Total `partnerEarningsCents` currently sitting on `UserProfile`
-     * documents — i.e. money owed to partners that they haven't withdrawn
-     * yet. This is the platform's largest in-DB liability.
-     */
-    totalPartnerLiabilityCents: number;
-    /** Lifetime sum of completed partner withdrawals. */
-    totalPartnerPaidOutCents: number;
-    /**
-     * Lifetime platform retention (formerly "community fee") in Peaks,
-     * across disclosed regions only. EUR equivalent is derived using the
-     * current `peaksPerEuro` rate.
-     */
-    totalPlatformRetentionPeaks: number;
-    totalPlatformRetentionEurCents: number;
+    /** Lifetime gross revenue across completed wave-unlock orders (`totalAmountMinor`). */
+    totalRevenueMinor: number;
+    /** Lifetime Stripe processing fees on completed wave-unlock orders. */
+    totalStripeFeesMinor: number;
+    /** Lifetime sum of `partnerSubtotalMinor` (transferred to partners at checkout). */
+    totalPartnerSubtotalMinor: number;
+    /** Lifetime platform fees earned (commission + Stripe-fee recovery). */
+    totalPlatformCommissionMinor: number;
+    /** Count of completed orders. */
+    totalOrders: number;
+    /** Always zero — partners are paid via Stripe destination charges. */
+    totalPartnerLiabilityMinor: number;
+    /** Same as gross partner subtotal (auto-transferred at checkout). */
+    totalPartnerPaidOutMinor: number;
   };
   derived: {
-    /**
-     * Best estimate of the platform's net margin over its lifetime:
-     *   revenue − stripe fees − amounts already paid to partners
-     *           − money still owed to partners (liability).
-     *
-     * This *intentionally* doesn't add platform retention back in: the
-     * retention is collected from buyer Peaks (already paid for at Peak-pack
-     * purchase time), so it's already part of `totalRevenueCents`.
-     */
-    netPlatformMarginCents: number;
-    /**
-     * `stripeAvailable - totalPartnerLiability`. When negative, a coordinated
-     * partner mass-withdrawal would fail because the platform's Stripe EUR
-     * balance can't cover what it owes. UI surfaces this as a red banner.
-     */
-    liabilityVsBalanceDeltaCents: number;
+    /** platform commission − Stripe fees. */
+    netPlatformMarginMinor: number;
+    /** Platform Stripe available balance in this currency. */
+    liabilityVsBalanceDeltaMinor: number;
   };
+};
+
+export type AdminFinanceOverviewDto = {
+  fetchedAt: string;
+  platformCommissionPercent: number;
+  rows: AdminFinanceCurrencyRowDto[];
+  /** Set when the Stripe balance call failed. UI shows a banner. */
+  stripeError: string | null;
 };
 
 @Injectable()
 export class AdminFinanceService {
   private readonly logger = new Logger(AdminFinanceService.name);
   private stripeClient: Stripe | null = null;
-  /**
-   * Cache the Stripe balance for a minute so the admin dashboard can
-   * comfortably poll without burning API requests. The endpoint is admin-only
-   * and the data is intrinsically eventually-consistent.
-   */
   private cachedBalance: {
     fetchedAt: number;
-    available: number;
-    pending: number;
-    nonEurCurrencies: string[];
+    availableByCurrency: Map<string, number>;
+    pendingByCurrency: Map<string, number>;
     error: string | null;
   } | null = null;
   private static readonly BALANCE_CACHE_MS = 60_000;
 
   constructor(
     private readonly config: ConfigService,
-    @InjectModel(WaveUnlockPurchase.name)
-    private readonly waveUnlockPurchaseModel: Model<WaveUnlockPurchase>,
-    @InjectModel(PeakPurchase.name)
-    private readonly peakPurchaseModel: Model<PeakPurchase>,
-    @InjectModel(PartnerWithdrawal.name)
-    private readonly partnerWithdrawalModel: Model<PartnerWithdrawal>,
-    @InjectModel(UserProfile.name)
-    private readonly userProfileModel: Model<UserProfile>,
+    @InjectModel(WaveUnlockOrder.name)
+    private readonly waveUnlockOrderModel: Model<WaveUnlockOrder>,
   ) {}
 
   private billing(): BillingConfigValues {
@@ -142,161 +98,153 @@ export class AdminFinanceService {
 
   async getOverview(): Promise<AdminFinanceOverviewDto> {
     const billing = this.billing();
-    const peaksPerEuro =
-      billing.peaksPerEuro && billing.peaksPerEuro > 0
-        ? billing.peaksPerEuro
-        : 100;
 
-    // Run all DB aggregations in parallel — they all hit different
-    // collections and none of them depend on the Stripe API call.
-    const [
-      balanceSnapshot,
-      revenueAgg,
-      liabilityAgg,
-      paidOutAgg,
-      retentionAgg,
-    ] = await Promise.all([
+    const [balanceSnapshot, revenueByCurrency] = await Promise.all([
       this.getStripeBalance(),
-      this.peakPurchaseModel
-        .aggregate<{
-          totalRevenueCents: number;
-          totalStripeFeesCents: number;
-          totalPurchases: number;
-          purchasesWithFeeData: number;
-        }>([
-          { $match: { status: 'completed' } },
-          {
-            $group: {
-              _id: null,
-              totalRevenueCents: {
-                $sum: { $ifNull: ['$totalAmountCents', 0] },
-              },
-              totalStripeFeesCents: {
-                $sum: { $ifNull: ['$stripeFeeCents', 0] },
-              },
-              totalPurchases: { $sum: 1 },
-              purchasesWithFeeData: {
-                $sum: { $cond: [{ $ne: ['$stripeFeeCents', null] }, 1, 0] },
-              },
-            },
-          },
-        ])
-        .exec(),
-      this.userProfileModel
-        .aggregate<{ total: number }>([
-          {
-            $group: {
-              _id: null,
-              total: { $sum: { $ifNull: ['$partnerEarningsCents', 0] } },
-            },
-          },
-        ])
-        .exec(),
-      this.partnerWithdrawalModel
-        .aggregate<{ total: number }>([
-          { $match: { status: 'completed' } },
-          {
-            $group: {
-              _id: null,
-              total: { $sum: { $ifNull: ['$amountCents', 0] } },
-            },
-          },
-        ])
-        .exec(),
-      this.waveUnlockPurchaseModel
-        .aggregate<{ totalRetentionPeaks: number }>([
-          {
-            $group: {
-              _id: null,
-              totalRetentionPeaks: {
-                $sum: {
-                  $cond: [
-                    {
-                      $regexMatch: {
-                        input: { $ifNull: ['$regionId', ''] },
-                        regex: UNDISCLOSED_REGION_ID_PATTERN,
-                      },
-                    },
-                    0,
-                    {
-                      // Prefer the new canonical field; fall back to the
-                      // legacy one so historical rows are still summed.
-                      $ifNull: [
-                        '$platformRetentionPeaks',
-                        { $ifNull: ['$communityFeePeaks', 0] },
-                      ],
-                    },
-                  ],
-                },
-              },
-            },
-          },
-        ])
-        .exec(),
+      this.aggregateRevenueByCurrency(),
     ]);
 
-    const revenue = revenueAgg[0] ?? {
-      totalRevenueCents: 0,
-      totalStripeFeesCents: 0,
-      totalPurchases: 0,
-      purchasesWithFeeData: 0,
-    };
-    const totalPartnerLiabilityCents = Math.max(
-      0,
-      liabilityAgg[0]?.total ?? 0,
-    );
-    const totalPartnerPaidOutCents = Math.max(0, paidOutAgg[0]?.total ?? 0);
-    const totalPlatformRetentionPeaks = Math.max(
-      0,
-      retentionAgg[0]?.totalRetentionPeaks ?? 0,
-    );
-    const totalPlatformRetentionEurCents = Math.floor(
-      (totalPlatformRetentionPeaks * 100) / peaksPerEuro,
-    );
+    const currencies = new Set<string>();
+    for (const cur of revenueByCurrency.keys()) currencies.add(cur);
+    for (const cur of balanceSnapshot.availableByCurrency.keys()) {
+      currencies.add(cur);
+    }
 
-    const netPlatformMarginCents =
-      revenue.totalRevenueCents -
-      revenue.totalStripeFeesCents -
-      totalPartnerPaidOutCents -
-      totalPartnerLiabilityCents;
-    const liabilityVsBalanceDeltaCents =
-      balanceSnapshot.available - totalPartnerLiabilityCents;
+    const rows: AdminFinanceCurrencyRowDto[] = [];
+    for (const cur of currencies) {
+      const r = revenueByCurrency.get(cur) ?? {
+        totalRevenueMinor: 0,
+        totalStripeFeesMinor: 0,
+        totalPartnerSubtotalMinor: 0,
+        totalPlatformCommissionMinor: 0,
+        totalOrders: 0,
+      };
+      const availableMinor =
+        balanceSnapshot.availableByCurrency.get(cur) ?? 0;
+      const pendingMinor = balanceSnapshot.pendingByCurrency.get(cur) ?? 0;
+      // Partners are paid via destination charges at checkout — no internal
+      // liability bucket. Platform margin is (app fee on charge) minus Stripe fees.
+      const netPlatformMarginMinor =
+        r.totalPlatformCommissionMinor - r.totalStripeFeesMinor;
+      rows.push({
+        currency: cur,
+        stripe: {
+          availableMinor,
+          pendingMinor,
+          error: balanceSnapshot.error,
+        },
+        ledger: {
+          totalRevenueMinor: r.totalRevenueMinor,
+          totalStripeFeesMinor: r.totalStripeFeesMinor,
+          totalPartnerSubtotalMinor: r.totalPartnerSubtotalMinor,
+          totalPlatformCommissionMinor: r.totalPlatformCommissionMinor,
+          totalOrders: r.totalOrders,
+          totalPartnerLiabilityMinor: 0,
+          totalPartnerPaidOutMinor: r.totalPartnerSubtotalMinor,
+        },
+        derived: {
+          netPlatformMarginMinor,
+          liabilityVsBalanceDeltaMinor: availableMinor,
+        },
+      });
+    }
+    rows.sort((a, b) => a.currency.localeCompare(b.currency));
 
     return {
       fetchedAt: new Date().toISOString(),
-      peaksPerEuro,
-      stripe: {
-        availableEurCents: balanceSnapshot.available,
-        pendingEurCents: balanceSnapshot.pending,
-        nonEurCurrencies: balanceSnapshot.nonEurCurrencies,
-        error: balanceSnapshot.error,
-      },
-      ledger: {
-        totalRevenueCents: revenue.totalRevenueCents,
-        totalStripeFeesCents: revenue.totalStripeFeesCents,
-        purchasesWithFeeData: revenue.purchasesWithFeeData,
-        totalPurchases: revenue.totalPurchases,
-        totalPartnerLiabilityCents,
-        totalPartnerPaidOutCents,
-        totalPlatformRetentionPeaks,
-        totalPlatformRetentionEurCents,
-      },
-      derived: {
-        netPlatformMarginCents,
-        liabilityVsBalanceDeltaCents,
-      },
+      platformCommissionPercent: billing.platformCommissionPercent,
+      rows,
+      stripeError: balanceSnapshot.error,
     };
   }
 
+  private async aggregateRevenueByCurrency(): Promise<
+    Map<
+      string,
+      {
+        totalRevenueMinor: number;
+        totalStripeFeesMinor: number;
+        totalPartnerSubtotalMinor: number;
+        totalPlatformCommissionMinor: number;
+        totalOrders: number;
+      }
+    >
+  > {
+    const rows = await this.waveUnlockOrderModel
+      .aggregate<{
+        _id: string;
+        totalRevenueMinor: number;
+        totalStripeFeesMinor: number;
+        totalPartnerSubtotalMinor: number;
+        totalPlatformCommissionMinor: number;
+        totalOrders: number;
+      }>([
+        { $match: { status: 'completed' } },
+        {
+          $group: {
+            _id: '$currency',
+            totalRevenueMinor: {
+              $sum: { $ifNull: ['$totalAmountMinor', 0] },
+            },
+            totalStripeFeesMinor: {
+              $sum: { $ifNull: ['$stripeFeeMinor', 0] },
+            },
+            totalPartnerSubtotalMinor: {
+              $sum: { $ifNull: ['$partnerSubtotalMinor', 0] },
+            },
+            totalPlatformCommissionMinor: {
+              $sum: {
+                $cond: [
+                  {
+                    $regexMatch: {
+                      input: { $ifNull: ['$regionId', ''] },
+                      regex: UNDISCLOSED_REGION_ID_PATTERN,
+                    },
+                  },
+                  0,
+                  {
+                    $subtract: [
+                      { $ifNull: ['$totalAmountMinor', 0] },
+                      { $ifNull: ['$partnerSubtotalMinor', 0] },
+                    ],
+                  },
+                ],
+              },
+            },
+            totalOrders: { $sum: 1 },
+          },
+        },
+      ])
+      .exec();
+    const out = new Map<
+      string,
+      {
+        totalRevenueMinor: number;
+        totalStripeFeesMinor: number;
+        totalPartnerSubtotalMinor: number;
+        totalPlatformCommissionMinor: number;
+        totalOrders: number;
+      }
+    >();
+    for (const row of rows) {
+      out.set(row._id, {
+        totalRevenueMinor: row.totalRevenueMinor,
+        totalStripeFeesMinor: row.totalStripeFeesMinor,
+        totalPartnerSubtotalMinor: row.totalPartnerSubtotalMinor,
+        totalPlatformCommissionMinor: row.totalPlatformCommissionMinor,
+        totalOrders: row.totalOrders,
+      });
+    }
+    return out;
+  }
+
   /**
-   * Cached Stripe balance fetch. Returns zeros + an `error` string on
-   * Stripe outage so the dashboard can render with a banner instead of
-   * 500ing the whole page.
+   * Cached Stripe balance fetch. Returns empty maps + an `error` string on
+   * Stripe outage so the dashboard renders with a banner instead of 500ing.
    */
   private async getStripeBalance(): Promise<{
-    available: number;
-    pending: number;
-    nonEurCurrencies: string[];
+    availableByCurrency: Map<string, number>;
+    pendingByCurrency: Map<string, number>;
     error: string | null;
   }> {
     const now = Date.now();
@@ -304,53 +252,52 @@ export class AdminFinanceService {
       this.cachedBalance &&
       now - this.cachedBalance.fetchedAt < AdminFinanceService.BALANCE_CACHE_MS
     ) {
-      const { available, pending, nonEurCurrencies, error } =
-        this.cachedBalance;
-      return { available, pending, nonEurCurrencies, error };
+      return {
+        availableByCurrency: this.cachedBalance.availableByCurrency,
+        pendingByCurrency: this.cachedBalance.pendingByCurrency,
+        error: this.cachedBalance.error,
+      };
     }
     try {
       const balance = await this.stripe().balance.retrieve();
-      const pickEur = (
-        items: Stripe.Balance['available'] | Stripe.Balance['pending'],
-      ): number =>
-        (items ?? []).find((b) => (b.currency ?? '').toLowerCase() === 'eur')
-          ?.amount ?? 0;
-      const available = pickEur(balance.available);
-      const pending = pickEur(balance.pending);
-      const nonEur = new Set<string>();
-      for (const bucket of [
-        ...(balance.available ?? []),
-        ...(balance.pending ?? []),
-      ]) {
-        const c = (bucket.currency ?? '').toLowerCase();
-        if (c && c !== 'eur' && bucket.amount !== 0) nonEur.add(c);
+      const availableByCurrency = new Map<string, number>();
+      for (const bucket of balance.available ?? []) {
+        const cur = (bucket.currency ?? '').toUpperCase();
+        if (!cur) continue;
+        availableByCurrency.set(
+          cur,
+          (availableByCurrency.get(cur) ?? 0) + (bucket.amount ?? 0),
+        );
       }
-      const snapshot = {
+      const pendingByCurrency = new Map<string, number>();
+      for (const bucket of balance.pending ?? []) {
+        const cur = (bucket.currency ?? '').toUpperCase();
+        if (!cur) continue;
+        pendingByCurrency.set(
+          cur,
+          (pendingByCurrency.get(cur) ?? 0) + (bucket.amount ?? 0),
+        );
+      }
+      this.cachedBalance = {
         fetchedAt: now,
-        available,
-        pending,
-        nonEurCurrencies: [...nonEur].sort(),
-        error: null as string | null,
+        availableByCurrency,
+        pendingByCurrency,
+        error: null,
       };
-      this.cachedBalance = snapshot;
-      const { available: a, pending: p, nonEurCurrencies, error } = snapshot;
-      return { available: a, pending: p, nonEurCurrencies, error };
+      return { availableByCurrency, pendingByCurrency, error: null };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.warn(`Failed to fetch Stripe balance: ${message}`);
-      const snapshot = {
+      this.cachedBalance = {
         fetchedAt: now,
-        available: 0,
-        pending: 0,
-        nonEurCurrencies: [] as string[],
+        availableByCurrency: new Map(),
+        pendingByCurrency: new Map(),
         error: message,
       };
-      this.cachedBalance = snapshot;
       return {
-        available: snapshot.available,
-        pending: snapshot.pending,
-        nonEurCurrencies: snapshot.nonEurCurrencies,
-        error: snapshot.error,
+        availableByCurrency: new Map(),
+        pendingByCurrency: new Map(),
+        error: message,
       };
     }
   }
