@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -12,7 +13,7 @@ import {
 } from '@nestjs/common';
 import { Auth0JwtGuard } from '../auth/auth0-jwt.guard';
 import { AuthUserId } from '../auth/auth-user.decorator';
-import { FeedService } from './feed.service';
+import { FeedService, type UnlockCartIntent } from './feed.service';
 
 @Controller()
 @UseGuards(Auth0JwtGuard)
@@ -45,10 +46,7 @@ export class FeedController {
   }
 
   @Get('feed/search/geo-suggest')
-  geoSuggest(
-    @Query('q') q?: string,
-    @Query('limit') limit?: string,
-  ) {
+  geoSuggest(@Query('q') q?: string, @Query('limit') limit?: string) {
     return this.feed.geoSuggest(q, limit);
   }
 
@@ -96,10 +94,7 @@ export class FeedController {
   }
 
   @Get('feed/latest-waves')
-  latestWaves(
-    @AuthUserId() userId: string,
-    @Query('limit') limit?: string,
-  ) {
+  latestWaves(@AuthUserId() userId: string, @Query('limit') limit?: string) {
     return this.feed.listLatestWaves(userId, limit);
   }
 
@@ -118,24 +113,21 @@ export class FeedController {
     return this.feed.claimVideoWave(userId, jobId);
   }
 
-  @Post('discover/videos/:jobId/buy-claim')
+  /**
+   * Start a Stripe Checkout for a single wave. Returns `{ url, orderId }`;
+   * the client redirects the browser to `url`. The order is fulfilled by
+   * the Stripe webhook after the buyer completes payment.
+   */
+  @Post('discover/videos/:jobId/checkout')
   @HttpCode(HttpStatus.OK)
-  buyClaimVideo(
+  singleWaveCheckout(
     @AuthUserId() userId: string,
     @Param('jobId') jobId: string,
-    @Body() body?: { quantity?: number },
+    @Body() body?: { intent?: string },
   ) {
-    const quantity =
-      typeof body?.quantity === 'number' && body.quantity >= 1
-        ? Math.floor(body.quantity)
-        : 1;
-    return this.feed.buyAndClaimVideoWave(userId, jobId, quantity);
-  }
-
-  @Post('discover/videos/:jobId/sponsor')
-  @HttpCode(HttpStatus.OK)
-  sponsorVideo(@AuthUserId() userId: string, @Param('jobId') jobId: string) {
-    return this.feed.sponsorVideoWave(userId, jobId);
+    const intent: UnlockCartIntent =
+      body?.intent === 'sponsor' ? 'sponsor' : 'buy_claim';
+    return this.feed.startSingleWaveCheckout(userId, jobId, intent);
   }
 
   @Get('discover/videos/:jobId/checkout')
@@ -162,10 +154,54 @@ export class FeedController {
           )
           .map((row) => ({
             jobId: row.jobId,
-            intent: row.intent as 'buy_claim' | 'sponsor',
+            intent: row.intent as UnlockCartIntent,
           }))
       : [];
     return this.feed.quoteUnlockCart(userId, items);
+  }
+
+  /**
+   * Start a Stripe Checkout for one partner's cart group. Buyers with items
+   * from multiple partners call this endpoint once per partner; the cart UI
+   * surfaces one Checkout button per group.
+   */
+  @Post('discover/cart/checkout')
+  @HttpCode(HttpStatus.OK)
+  partnerCartCheckout(
+    @AuthUserId() userId: string,
+    @Body()
+    body: {
+      partnerUserId?: string;
+      jobIds?: string[];
+      intent?: string;
+    },
+  ) {
+    const partnerUserId = body?.partnerUserId?.trim();
+    if (!partnerUserId) {
+      throw new BadRequestException('partnerUserId is required');
+    }
+    const jobIds = Array.isArray(body?.jobIds)
+      ? body.jobIds.filter((id): id is string => typeof id === 'string')
+      : [];
+    if (jobIds.length === 0) {
+      throw new BadRequestException('jobIds is required');
+    }
+    const intent: UnlockCartIntent =
+      body?.intent === 'sponsor' ? 'sponsor' : 'buy_claim';
+    return this.feed.startPartnerCheckout(
+      userId,
+      partnerUserId,
+      jobIds,
+      intent,
+    );
+  }
+
+  @Get('orders/:orderId')
+  getOrderStatus(
+    @AuthUserId() userId: string,
+    @Param('orderId') orderId: string,
+  ) {
+    return this.feed.getOrderStatus(userId, orderId);
   }
 
   @Post('discover/videos/:jobId/shaka')
@@ -184,17 +220,5 @@ export class FeedController {
     @Param('jobId') jobId: string,
   ) {
     return this.feed.unshakaVideo(userId, jobId);
-  }
-
-  @Post('discover/cart/buy-claim-batch')
-  @HttpCode(HttpStatus.OK)
-  buyClaimCartBatch(
-    @AuthUserId() userId: string,
-    @Body() body: { jobIds?: string[] },
-  ) {
-    const jobIds = Array.isArray(body?.jobIds)
-      ? body.jobIds.filter((id): id is string => typeof id === 'string')
-      : [];
-    return this.feed.buyAndClaimVideoWaves(userId, jobIds);
   }
 }

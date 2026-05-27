@@ -9,14 +9,24 @@ import {
 import type { RawBodyRequest } from '@nestjs/common';
 import type { Request } from 'express';
 import type Stripe from 'stripe';
-import { BillingService } from './billing.service';
+import { StripeWebhookService } from './stripe-webhook.service';
 
+/**
+ * Routes Stripe Checkout webhooks (`checkout.session.completed`) to
+ * {@link StripeWebhookService}, which delegates to
+ * `CommercialWaveService.fulfillWaveOrder`. Two ingress paths:
+ *
+ *  - `/billing/stripe/webhook` — Stripe → API directly (verify signature here).
+ *  - `/billing/stripe/process-event` — Next.js BFF after it has verified the
+ *    signature on the raw request body, then forwarded the parsed event with
+ *    a shared internal secret.
+ */
 @Controller('billing/stripe')
 export class StripeWebhookController {
-  constructor(private readonly billing: BillingService) {}
+  constructor(private readonly webhook: StripeWebhookService) {}
 
   @Post('webhook')
-  webhook(
+  handleWebhook(
     @Req() req: RawBodyRequest<Request>,
     @Headers('stripe-signature') signature: string | undefined,
   ) {
@@ -24,18 +34,19 @@ export class StripeWebhookController {
     if (!raw || !Buffer.isBuffer(raw)) {
       throw new BadRequestException('Missing raw body for Stripe webhook');
     }
-    return this.billing.handleStripeWebhook(raw, signature);
+    return this.webhook.handleStripeWebhook(raw, signature);
   }
 
-  /** Called by the Next.js BFF after it verifies the Stripe signature on the raw body. */
   @Post('process-event')
   processEvent(
-    @Headers('x-peakd-billing-webhook-internal') internalSecret: string | undefined,
+    @Headers('x-peakd-billing-webhook-internal') internalSecret:
+      | string
+      | undefined,
     @Body() body: { event: Stripe.Event },
   ) {
     if (!body?.event?.type) {
       throw new BadRequestException('Missing Stripe event');
     }
-    return this.billing.processStripeEventFromBff(internalSecret, body.event);
+    return this.webhook.processStripeEventFromBff(internalSecret, body.event);
   }
 }
