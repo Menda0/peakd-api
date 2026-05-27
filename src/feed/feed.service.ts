@@ -15,6 +15,7 @@ import {
 import { Region } from '../studio/schemas/region.schema';
 import { Spot } from '../studio/schemas/spot.schema';
 import { SurfSession } from '../studio/schemas/surf-session.schema';
+import { StudioService } from '../studio/studio.service';
 import { PartnerProfile } from '../partner/schemas/partner-profile.schema';
 import { UserProfile } from '../users/schemas/user-profile.schema';
 import { CommercialWaveService } from '../commercial/commercial-wave.service';
@@ -378,6 +379,7 @@ export class FeedService {
     private readonly s3: S3Service,
     private readonly config: ConfigService,
     private readonly commercialWave: CommercialWaveService,
+    private readonly studio: StudioService,
   ) {}
 
   private async getShakaInfo(
@@ -2413,10 +2415,7 @@ export class FeedService {
       claimedByUserId: row.claimedByUserId ?? null,
     });
 
-    const shareToken =
-      typeof session.shareToken === 'string' && session.shareToken.trim()
-        ? session.shareToken.trim()
-        : null;
+    const shareToken = await this.studio.ensureShareTokenIfPublished(session);
 
     return {
       jobId: row.jobId,
@@ -2539,10 +2538,7 @@ export class FeedService {
       });
     }
 
-    const shareToken =
-      typeof session.shareToken === 'string' && session.shareToken.trim()
-        ? session.shareToken.trim()
-        : null;
+    const shareToken = await this.studio.ensureShareTokenIfPublished(session);
 
     const summaryDto = this.sessionToDto(session);
 

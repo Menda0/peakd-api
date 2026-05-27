@@ -3,6 +3,7 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { Auth0JwtGuard } from '../auth/auth0-jwt.guard';
 import { CommercialModule } from '../commercial/commercial.module';
 import { S3Module } from '../s3/s3.module';
+import { StudioModule } from '../studio/studio.module';
 import { Region, RegionSchema } from '../studio/schemas/region.schema';
 import { Spot, SpotSchema } from '../studio/schemas/spot.schema';
 import { SurfSession, SurfSessionSchema } from '../studio/schemas/surf-session.schema';
@@ -20,6 +21,7 @@ import { VideoShaka, VideoShakaSchema } from './schemas/video-shaka.schema';
   imports: [
     CommercialModule,
     S3Module,
+    StudioModule,
     MongooseModule.forFeature([
       { name: VideoJob.name, schema: VideoJobSchema },
       { name: SurfSession.name, schema: SurfSessionSchema },
