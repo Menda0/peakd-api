@@ -8,6 +8,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import archiver from 'archiver';
+import { randomUUID } from 'crypto';
 import { createWriteStream } from 'node:fs';
 import { basename, extname, join } from 'node:path';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -91,23 +92,25 @@ export class SessionExportService {
     }
 
     const closedAt = new Date().toISOString();
+    const $set: Record<string, unknown> = {
+      status: 'closed',
+      closedAt,
+      exportStatus: 'processing',
+      exportZipKey: null,
+      exportErrorMessage: null,
+      rawExportStatus: 'processing',
+      rawExportZipKey: null,
+      rawExportErrorMessage: null,
+      rawExportExpiresAt: null,
+    };
+    if (session.sessionKind !== 'personal') {
+      $set.shareToken =
+        typeof session.shareToken === 'string' && session.shareToken.trim()
+          ? session.shareToken.trim()
+          : randomUUID();
+    }
     await this.surfSessionModel
-      .updateOne(
-        { sessionId, userId },
-        {
-          $set: {
-            status: 'closed',
-            closedAt,
-            exportStatus: 'processing',
-            exportZipKey: null,
-            exportErrorMessage: null,
-            rawExportStatus: 'processing',
-            rawExportZipKey: null,
-            rawExportErrorMessage: null,
-            rawExportExpiresAt: null,
-          },
-        },
-      )
+      .updateOne({ sessionId, userId }, { $set })
       .exec();
 
     const partner = await this.partnerProfileModel

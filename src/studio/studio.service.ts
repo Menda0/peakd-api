@@ -408,19 +408,35 @@ export class StudioService {
       );
     }
 
-    let shareToken =
-      typeof session.shareToken === 'string' && session.shareToken.trim()
-        ? session.shareToken.trim()
-        : null;
-
+    const shareToken = await this.ensureShareTokenIfPublished(session);
     if (!shareToken) {
-      shareToken = randomUUID();
-      await this.surfSessionModel
-        .updateOne({ sessionId, userId }, { $set: { shareToken } })
-        .exec();
+      throw new BadRequestException('Could not create share link for session');
     }
 
     return { shareToken };
+  }
+
+  /** Published studio sessions are always shareable; creates a token if missing. */
+  async ensureShareTokenIfPublished(session: {
+    sessionId: string;
+    status: 'open' | 'closed';
+    sessionKind: 'studio' | 'personal';
+    shareToken?: string | null;
+  }): Promise<string | null> {
+    if (session.sessionKind === 'personal' || session.status !== 'closed') {
+      return null;
+    }
+    const existing =
+      typeof session.shareToken === 'string' && session.shareToken.trim()
+        ? session.shareToken.trim()
+        : null;
+    if (existing) return existing;
+
+    const shareToken = randomUUID();
+    await this.surfSessionModel
+      .updateOne({ sessionId: session.sessionId }, { $set: { shareToken } })
+      .exec();
+    return shareToken;
   }
 
   private normalizeExportStatus(raw: unknown): SurfSessionExportStatus {
