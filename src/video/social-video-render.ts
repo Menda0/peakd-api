@@ -43,7 +43,8 @@ export async function renderSocialVariant(
   const outputPath = join(workDir, profile.outputBasename);
 
   const padColor = '0x0d1117';
-  const scaleFilter = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=${padColor},setsar=1,fps=30`;
+  // Cover the canvas: scale up to fill, center-crop overflow (no letterboxing).
+  const scaleFilter = `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},setsar=1,fps=30`;
 
   const scaledArgs = [
     '-y',
