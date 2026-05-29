@@ -349,8 +349,10 @@ export class VideoProcessingService {
 
       const socialVariants: RenderedSocialVariant[] = [];
       const smartCrop = smartCropOptionsFromConfig(videoCfg);
+      // Social exports use the original upload (no feed watermark).
+      const socialSourcePath = inputPath;
       const subjectAnalysis = await analyzeSubjectTrack(
-        processedPath,
+        socialSourcePath,
         workDir,
         bins,
         smartCrop,
@@ -370,7 +372,7 @@ export class VideoProcessingService {
 
       await reframeVideoToTarget({
         bins,
-        sourcePath: processedPath,
+        sourcePath: socialSourcePath,
         workDir,
         outputPath: reframe916Path,
         targetWidth: 1080,
@@ -386,7 +388,7 @@ export class VideoProcessingService {
 
       await reframeVideoToTarget({
         bins,
-        sourcePath: processedPath,
+        sourcePath: socialSourcePath,
         workDir,
         outputPath: reframe11Path,
         targetWidth: 1080,

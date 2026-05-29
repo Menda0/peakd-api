@@ -35,7 +35,8 @@ export async function buildSocialOutroCardPng(options: {
   const textHeight = textMeta.height ?? fontSize + 24;
 
   const logoTop = Math.round(height * 0.35 - logoHeight / 2);
-  const textTop = Math.round(height * 0.72);
+  const textGap = Math.max(16, Math.round(height * 0.02));
+  const textTop = logoTop + logoHeight + textGap;
 
   await sharp({
     create: {
