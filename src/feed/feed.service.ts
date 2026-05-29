@@ -53,7 +53,8 @@ const MAX_LIMIT = 50;
 const SNAPSHOT_URL_MAX = 4;
 const DEFAULT_GEO_SUGGEST_LIMIT = 12;
 const MAX_GEO_SUGGEST_LIMIT = 24;
-const SEARCH_PREVIEW_THUMBS = 3;
+/** Matches frontend `SESSION_PREVIEW_SLOTS_MOBILE` on search session cards. */
+const SEARCH_PREVIEW_THUMBS = 5;
 const COUNTRY_CODE = /^[A-Z]{2}$/;
 const SESSION_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const MONTH_YM = /^\d{4}-\d{2}$/;
