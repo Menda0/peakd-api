@@ -301,3 +301,17 @@ export function allocateBuyClaimLineBreakdownsMinor(
     ),
   );
 }
+
+/** True when the viewer unlocked the wave, or owns the session and a surfer unlocked it. */
+export function isCommercialVideoUnlockedForViewer(options: {
+  videoUnlockedForUserId: string | null | undefined;
+  viewerUserId: string;
+  sessionOwnerUserId: string;
+}): boolean {
+  const unlockedFor = options.videoUnlockedForUserId?.trim() || null;
+  if (!unlockedFor) return false;
+  const viewer = options.viewerUserId.trim();
+  if (!viewer) return false;
+  if (unlockedFor === viewer) return true;
+  return options.sessionOwnerUserId.trim() === viewer;
+}
