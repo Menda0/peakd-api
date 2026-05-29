@@ -33,6 +33,8 @@ import {
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const COUNTRY_CODE = /^[A-Z]{2}$/;
 const SESSION_TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
+/** Matches frontend `SESSION_PREVIEW_SLOTS_MOBILE` on session cards. */
+const SESSION_PREVIEW_THUMBS_MAX = 5;
 
 function normalizeCountryCode(code: string): string {
   return code.trim().toUpperCase();
@@ -718,7 +720,7 @@ export class StudioService {
       const firstSnap = job.snapshotKeys?.[0];
       if (status === 'completed' && firstSnap) {
         const list = thumbJobsBySession.get(sid) ?? [];
-        if (list.length < 4) {
+        if (list.length < SESSION_PREVIEW_THUMBS_MAX) {
           list.push({ snapshotKey: firstSnap });
           thumbJobsBySession.set(sid, list);
         }

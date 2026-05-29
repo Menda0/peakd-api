@@ -21,6 +21,7 @@ import {
 import { PartnerProfile } from '../partner/schemas/partner-profile.schema';
 import { UserProfile } from '../users/schemas/user-profile.schema';
 import { S3Service } from '../s3/s3.service';
+import { VideoShaka } from '../feed/schemas/video-shaka.schema';
 import { VideoJob } from '../video/schemas/video-job.schema';
 import {
   isUndisclosedRegionId,
@@ -57,6 +58,8 @@ export type PublicSharedSessionWaveDto = {
   canBuyClaim: boolean;
   canSponsor: boolean;
   claimedByViewer: boolean;
+  shakaCount: number;
+  shakaedByViewer: boolean;
 };
 
 export type PublicSharedSessionDto = {
@@ -92,6 +95,8 @@ export class SharedSessionService {
     private readonly surfSessionModel: Model<SurfSession>,
     @InjectModel(VideoJob.name)
     private readonly videoJobModel: Model<VideoJob>,
+    @InjectModel(VideoShaka.name)
+    private readonly videoShakaModel: Model<VideoShaka>,
     @InjectModel(Region.name)
     private readonly regionModel: Model<Region>,
     @InjectModel(Spot.name)
@@ -101,6 +106,49 @@ export class SharedSessionService {
     @InjectModel(UserProfile.name)
     private readonly userProfileModel: Model<UserProfile>,
   ) {}
+
+  private async getShakaInfo(
+    jobIds: string[],
+    viewerUserId?: string | null,
+  ): Promise<Map<string, { count: number; viewerShaka: boolean }>> {
+    const result = new Map<string, { count: number; viewerShaka: boolean }>();
+    const ids = Array.from(new Set(jobIds.filter((id) => id?.trim())));
+    if (ids.length === 0) return result;
+    for (const id of ids) {
+      result.set(id, { count: 0, viewerShaka: false });
+    }
+    const viewerId = viewerUserId?.trim() || null;
+    const [counts, viewerRows] = await Promise.all([
+      this.videoShakaModel
+        .aggregate<{ _id: string; count: number }>([
+          { $match: { jobId: { $in: ids } } },
+          { $group: { _id: '$jobId', count: { $sum: 1 } } },
+        ])
+        .exec(),
+      viewerId
+        ? this.videoShakaModel
+            .find({ jobId: { $in: ids }, userId: viewerId })
+            .lean()
+            .exec()
+        : Promise.resolve([]),
+    ]);
+    for (const row of counts) {
+      const entry = result.get(row._id);
+      if (entry) entry.count = row.count;
+    }
+    for (const row of viewerRows) {
+      const entry = result.get(row.jobId);
+      if (entry) entry.viewerShaka = true;
+    }
+    return result;
+  }
+
+  private shakaInfoFor(
+    map: Map<string, { count: number; viewerShaka: boolean }>,
+    jobId: string,
+  ): { count: number; viewerShaka: boolean } {
+    return map.get(jobId) ?? { count: 0, viewerShaka: false };
+  }
 
   private normalizeWaveTypes(raw: unknown): string[] {
     if (!Array.isArray(raw)) return [];
@@ -353,6 +401,10 @@ export class SharedSessionService {
     );
     const isCommercial = session.isCommercial === true;
     const viewerId = viewerUserId?.trim() || null;
+    const completedJobIds = jobs
+      .filter((doc) => doc.processedKey)
+      .map((doc) => doc.jobId);
+    const shakaInfo = await this.getShakaInfo(completedJobIds, viewerId);
 
     const waves: PublicSharedSessionWaveDto[] = [];
     for (const doc of jobs) {
@@ -434,6 +486,7 @@ export class SharedSessionService {
         ? hasOriginal &&
           (commercialFields.videoUnlockedByViewer || viewerIsSessionOwner)
         : hasOriginal;
+      const shaka = this.shakaInfoFor(shakaInfo, doc.jobId);
 
       waves.push({
         jobId: doc.jobId,
@@ -458,6 +511,8 @@ export class SharedSessionService {
         canBuyClaim: commercialFields.canBuyClaim,
         canSponsor: commercialFields.canSponsor,
         claimedByViewer: commercialFields.claimedByViewer,
+        shakaCount: shaka.count,
+        shakaedByViewer: shaka.viewerShaka,
       });
     }
 

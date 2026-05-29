@@ -12,6 +12,7 @@ import { StudioService } from './studio.service';
 import { SurfSessionIndexesService } from './surf-session-indexes.service';
 import { Auth0JwtGuard } from '../auth/auth0-jwt.guard';
 import { S3Module } from '../s3/s3.module';
+import { VideoShaka, VideoShakaSchema } from '../feed/schemas/video-shaka.schema';
 import { VideoJob, VideoJobSchema } from '../video/schemas/video-job.schema';
 import {
   PartnerProfile,
@@ -30,6 +31,7 @@ import {
       { name: Spot.name, schema: SpotSchema },
       { name: SurfSession.name, schema: SurfSessionSchema },
       { name: VideoJob.name, schema: VideoJobSchema },
+      { name: VideoShaka.name, schema: VideoShakaSchema },
       { name: PartnerProfile.name, schema: PartnerProfileSchema },
       { name: UserProfile.name, schema: UserProfileSchema },
     ]),
