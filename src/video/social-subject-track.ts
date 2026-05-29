@@ -1,8 +1,9 @@
-import { mkdir, readdir, rm } from 'node:fs/promises';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { FfmpegBinaries } from '../ffmpeg/ffmpeg.helper';
-import { ffprobeJson, runFfmpeg } from '../ffmpeg/ffmpeg.helper';
+import { ffprobeJson } from '../ffmpeg/ffmpeg.helper';
 import { detectLargestPerson } from './social-subject-detector';
+import { extractSampleFrames } from './video-frame-analysis';
 import {
   capPanSpeed,
   smoothSubjectSamples,
@@ -14,35 +15,7 @@ import type {
   SubjectTrackAnalysis,
 } from './social-subject.types';
 
-async function extractSampleFrames(
-  videoPath: string,
-  framesDir: string,
-  sampleFps: number,
-  maxFrames: number,
-  bins: FfmpegBinaries,
-): Promise<string[]> {
-  await mkdir(framesDir, { recursive: true });
-  await runFfmpeg(
-    [
-      '-y',
-      '-i',
-      videoPath,
-      '-vf',
-      `fps=${sampleFps}`,
-      '-frames:v',
-      String(maxFrames),
-      '-q:v',
-      '2',
-      join(framesDir, 'frame_%04d.jpg'),
-    ],
-    bins,
-  );
-  const entries = await readdir(framesDir);
-  return entries
-    .filter((f) => f.startsWith('frame_') && f.endsWith('.jpg'))
-    .sort()
-    .map((f) => join(framesDir, f));
-}
+export { extractSampleFrames } from './video-frame-analysis';
 
 export async function analyzeSubjectTrack(
   videoPath: string,

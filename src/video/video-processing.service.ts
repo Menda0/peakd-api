@@ -15,9 +15,14 @@ import type { Express } from 'express';
 import { Model } from 'mongoose';
 import { VIDEO_CONFIG, VideoConfigValues } from '../config/video.config';
 import { ffprobeJson, runFfmpeg } from '../ffmpeg/ffmpeg.helper';
-import { planSnapshotTimes } from './snapshot-planner';
 import { S3Service } from '../s3/s3.service';
 import type { VideoJobMeta, VideoJobMetaSocialVariant } from './video-job-meta';
+import {
+  analyzeVideoFrames,
+  highlightOptionsFromConfig,
+} from './video-frame-analysis';
+import { planHighlightSnapshots } from './highlight-snapshot-planner';
+import { materializeHighlightSnapshots } from './highlight-snapshot-materialize';
 import {
   VideoJob,
   type VideoUploadSource,
@@ -247,15 +252,6 @@ export class VideoProcessingService {
         .updateOne({ jobId }, { $set: { rawOriginalKey } })
         .exec();
 
-      const snapshotTimes = planSnapshotTimes(mainDurationSec, {
-        interiorStartRatio: videoCfg.interiorStartRatio,
-        interiorEndRatio: videoCfg.interiorEndRatio,
-        snapshotMinFrames: videoCfg.snapshotMinFrames,
-        snapshotMaxFrames: videoCfg.snapshotMaxFrames,
-        snapshotScaleShortSec: videoCfg.snapshotScaleShortSec,
-        snapshotScaleLongSec: videoCfg.snapshotScaleLongSec,
-      });
-
       const filterComplex =
         '[1:v][0:v]scale2ref=w=iw*15/100:h=ow/mdar[wm][main];[main][wm]overlay=W-w-24:24[outv]';
 
@@ -299,32 +295,46 @@ export class VideoProcessingService {
         throw new InternalServerErrorException(`Transcode failed: ${msg}`);
       }
 
-      const snapshotPaths: string[] = [];
-      for (let i = 0; i < snapshotTimes.length; i++) {
-        const name = `snapshot_${String(i + 1).padStart(3, '0')}.jpg`;
-        const outPath = join(workDir, name);
-        snapshotPaths.push(outPath);
-        try {
-          await runFfmpeg(
-            [
-              '-y',
-              '-i',
-              processedPath,
-              '-ss',
-              String(snapshotTimes[i]),
-              '-frames:v',
-              '1',
-              '-q:v',
-              '2',
-              outPath,
-            ],
-            bins,
-          );
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          throw new InternalServerErrorException(`Snapshot failed: ${msg}`);
-        }
+      const highlightOpts = highlightOptionsFromConfig(videoCfg);
+      const snapshotPlannerOpts = {
+        interiorStartRatio: videoCfg.interiorStartRatio,
+        interiorEndRatio: videoCfg.interiorEndRatio,
+        snapshotMinFrames: videoCfg.snapshotMinFrames,
+        snapshotMaxFrames: videoCfg.snapshotMaxFrames,
+        snapshotScaleShortSec: videoCfg.snapshotScaleShortSec,
+        snapshotScaleLongSec: videoCfg.snapshotScaleLongSec,
+      };
+
+      const frameAnalysis = await analyzeVideoFrames(
+        processedPath,
+        workDir,
+        bins,
+        highlightOpts,
+      );
+
+      const highlightResult = planHighlightSnapshots(
+        frameAnalysis.scoredFrames,
+        mainDurationSec,
+        snapshotPlannerOpts,
+        highlightOpts,
+      );
+
+      if (
+        highlightOpts.enabled &&
+        highlightResult.method === 'even' &&
+        highlightResult.detectionHitRate < highlightOpts.fallbackHitRate
+      ) {
+        this.logger.warn(
+          `Job ${jobId}: highlight detection hit rate ${(highlightResult.detectionHitRate * 100).toFixed(0)}% — using even snapshot spacing`,
+        );
       }
+
+      const snapshotPaths = await materializeHighlightSnapshots(
+        highlightResult.selections,
+        workDir,
+        processedPath,
+        bins,
+      );
 
       const prefix = `videos/${userId}/${jobId}`;
       const processedKey = `${prefix}/processed.webm`;
@@ -466,6 +476,8 @@ export class VideoProcessingService {
         socialVariants: metaSocialVariants,
         subjectTrackSampleCount: subjectAnalysis.sampleCount,
         subjectTrackDetectionHitRate: subjectAnalysis.detectionHitRate,
+        highlightSnapshotMethod: highlightResult.method,
+        highlightDetectionHitRate: highlightResult.detectionHitRate,
         surfSessionId: surfSessionId ?? null,
       };
       await this.s3.putJson(`${prefix}/meta.json`, meta);

@@ -20,6 +20,15 @@ export interface VideoConfigValues {
   socialTrackFallbackCenterY: number;
   socialTrackSendcmdIntervalSec: number;
   socialDetectorModelPath: string;
+  highlightSnapshotsEnabled: boolean;
+  highlightSampleFps: number;
+  highlightMaxSampleFrames: number;
+  highlightMinPersonArea: number;
+  highlightWeightPerson: number;
+  highlightWeightMotion: number;
+  highlightWeightSharpness: number;
+  highlightWeightCenter: number;
+  highlightFallbackHitRate: number;
   /** Executable for ffmpeg (name on PATH or absolute path) */
   ffmpegBin: string;
   /** Executable for ffprobe (name on PATH or absolute path) */
@@ -89,6 +98,42 @@ export const videoConfig = registerAs(
     socialDetectorModelPath:
       process.env.SOCIAL_DETECTOR_MODEL_PATH?.trim() ||
       join(process.cwd(), 'assets/models/yolov8n.onnx'),
+    highlightSnapshotsEnabled:
+      (process.env.HIGHLIGHT_SNAPSHOTS_ENABLED ?? 'true')
+        .trim()
+        .toLowerCase() !== 'false',
+    highlightSampleFps: Math.min(
+      10,
+      Math.max(1, Number(process.env.HIGHLIGHT_SAMPLE_FPS ?? 4)),
+    ),
+    highlightMaxSampleFrames: Math.min(
+      240,
+      Math.max(10, Number(process.env.HIGHLIGHT_MAX_SAMPLE_FRAMES ?? 120)),
+    ),
+    highlightMinPersonArea: Math.min(
+      0.5,
+      Math.max(0.001, Number(process.env.HIGHLIGHT_MIN_PERSON_AREA ?? 0.008)),
+    ),
+    highlightWeightPerson: Math.max(
+      0,
+      Number(process.env.HIGHLIGHT_WEIGHT_PERSON ?? 0.4),
+    ),
+    highlightWeightMotion: Math.max(
+      0,
+      Number(process.env.HIGHLIGHT_WEIGHT_MOTION ?? 0.35),
+    ),
+    highlightWeightSharpness: Math.max(
+      0,
+      Number(process.env.HIGHLIGHT_WEIGHT_SHARPNESS ?? 0.15),
+    ),
+    highlightWeightCenter: Math.max(
+      0,
+      Number(process.env.HIGHLIGHT_WEIGHT_CENTER ?? 0.1),
+    ),
+    highlightFallbackHitRate: Math.min(
+      1,
+      Math.max(0, Number(process.env.HIGHLIGHT_FALLBACK_HIT_RATE ?? 0.5)),
+    ),
     ffmpegBin: (process.env.FFMPEG_PATH ?? 'ffmpeg').trim() || 'ffmpeg',
     ffprobeBin: (process.env.FFPROBE_PATH ?? 'ffprobe').trim() || 'ffprobe',
     maxUploadBytes: Number(process.env.MAX_UPLOAD_MB ?? 500) * 1024 * 1024,

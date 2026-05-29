@@ -20,5 +20,7 @@ export interface VideoJobMeta {
   socialVariants?: VideoJobMetaSocialVariant[];
   subjectTrackSampleCount?: number;
   subjectTrackDetectionHitRate?: number;
+  highlightSnapshotMethod?: 'tier2' | 'even';
+  highlightDetectionHitRate?: number;
   surfSessionId?: string | null;
 }
