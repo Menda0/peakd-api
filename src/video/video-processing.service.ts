@@ -15,14 +15,30 @@ import type { Express } from 'express';
 import { Model } from 'mongoose';
 import { VIDEO_CONFIG, VideoConfigValues } from '../config/video.config';
 import { ffprobeJson, runFfmpeg } from '../ffmpeg/ffmpeg.helper';
-import { planSnapshotTimes } from './snapshot-planner';
 import { S3Service } from '../s3/s3.service';
-import type { VideoJobMeta } from './video-job-meta';
+import type { VideoJobMeta, VideoJobMetaSocialVariant } from './video-job-meta';
+import {
+  analyzeVideoFrames,
+  highlightOptionsFromConfig,
+} from './video-frame-analysis';
+import { planHighlightSnapshots } from './highlight-snapshot-planner';
+import { materializeHighlightSnapshots } from './highlight-snapshot-materialize';
 import {
   VideoJob,
   type VideoUploadSource,
 } from './schemas/video-job.schema';
 import { StudioService } from '../studio/studio.service';
+import { SOCIAL_VIDEO_PROFILES } from './social-video-profiles';
+import { reframeVideoToTarget } from './social-dynamic-crop';
+import {
+  analyzeSubjectTrack,
+  smartCropOptionsFromConfig,
+} from './social-subject-track';
+import {
+  extractSocialThumbnail,
+  renderSocialVariant,
+} from './social-video-render';
+import type { RenderedSocialVariant } from './social-video.types';
 
 export interface StartVideoJobResult {
   jobId: string;
@@ -54,6 +70,7 @@ type JobPipelineContext = {
   surfSessionId: string | null;
   createdAt: string;
   watermarkPath: string;
+  socialOutroLogoPath: string;
   videoCfg: VideoConfigValues;
 };
 
@@ -113,6 +130,20 @@ export class VideoProcessingService {
       );
     }
 
+    const socialOutroLogoPath = videoCfg.socialOutroLogoPath?.trim();
+    if (!socialOutroLogoPath) {
+      throw new InternalServerErrorException(
+        'SOCIAL_OUTRO_LOGO_PATH is not configured',
+      );
+    }
+    try {
+      await access(socialOutroLogoPath);
+    } catch {
+      throw new InternalServerErrorException(
+        `Social outro logo not readable: ${socialOutroLogoPath}`,
+      );
+    }
+
     const mime = file.mimetype ?? '';
     if (!videoCfg.allowedMimeTypes.includes(mime)) {
       throw new BadRequestException(
@@ -135,6 +166,7 @@ export class VideoProcessingService {
       surfSessionId: surfSessionId ?? null,
       status: 'processing',
       snapshotKeys: [],
+      socialVariants: [],
       rawOriginalKey: null,
       uploadSource,
       discoverPublishedAt: isPersonal ? createdAt : null,
@@ -152,6 +184,7 @@ export class VideoProcessingService {
       surfSessionId,
       createdAt,
       watermarkPath,
+      socialOutroLogoPath,
       videoCfg,
     };
 
@@ -180,6 +213,7 @@ export class VideoProcessingService {
       surfSessionId,
       createdAt,
       watermarkPath,
+      socialOutroLogoPath,
       videoCfg,
     } = ctx;
 
@@ -191,11 +225,11 @@ export class VideoProcessingService {
     const processedPath = join(workDir, 'processed.webm');
 
     try {
-      let durationSec: number;
+      let mainDurationSec: number;
       let hasAudio: boolean;
       try {
         const probe = await ffprobeJson(inputPath, bins);
-        durationSec = probe.durationSec;
+        mainDurationSec = probe.durationSec;
         hasAudio = probe.hasAudio;
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -217,15 +251,6 @@ export class VideoProcessingService {
       await this.videoJobModel
         .updateOne({ jobId }, { $set: { rawOriginalKey } })
         .exec();
-
-      const snapshotTimes = planSnapshotTimes(durationSec, {
-        interiorStartRatio: videoCfg.interiorStartRatio,
-        interiorEndRatio: videoCfg.interiorEndRatio,
-        snapshotMinFrames: videoCfg.snapshotMinFrames,
-        snapshotMaxFrames: videoCfg.snapshotMaxFrames,
-        snapshotScaleShortSec: videoCfg.snapshotScaleShortSec,
-        snapshotScaleLongSec: videoCfg.snapshotScaleLongSec,
-      });
 
       const filterComplex =
         '[1:v][0:v]scale2ref=w=iw*15/100:h=ow/mdar[wm][main];[main][wm]overlay=W-w-24:24[outv]';
@@ -270,32 +295,46 @@ export class VideoProcessingService {
         throw new InternalServerErrorException(`Transcode failed: ${msg}`);
       }
 
-      const snapshotPaths: string[] = [];
-      for (let i = 0; i < snapshotTimes.length; i++) {
-        const name = `snapshot_${String(i + 1).padStart(3, '0')}.jpg`;
-        const outPath = join(workDir, name);
-        snapshotPaths.push(outPath);
-        try {
-          await runFfmpeg(
-            [
-              '-y',
-              '-i',
-              processedPath,
-              '-ss',
-              String(snapshotTimes[i]),
-              '-frames:v',
-              '1',
-              '-q:v',
-              '2',
-              outPath,
-            ],
-            bins,
-          );
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          throw new InternalServerErrorException(`Snapshot failed: ${msg}`);
-        }
+      const highlightOpts = highlightOptionsFromConfig(videoCfg);
+      const snapshotPlannerOpts = {
+        interiorStartRatio: videoCfg.interiorStartRatio,
+        interiorEndRatio: videoCfg.interiorEndRatio,
+        snapshotMinFrames: videoCfg.snapshotMinFrames,
+        snapshotMaxFrames: videoCfg.snapshotMaxFrames,
+        snapshotScaleShortSec: videoCfg.snapshotScaleShortSec,
+        snapshotScaleLongSec: videoCfg.snapshotScaleLongSec,
+      };
+
+      const frameAnalysis = await analyzeVideoFrames(
+        processedPath,
+        workDir,
+        bins,
+        highlightOpts,
+      );
+
+      const highlightResult = planHighlightSnapshots(
+        frameAnalysis.scoredFrames,
+        mainDurationSec,
+        snapshotPlannerOpts,
+        highlightOpts,
+      );
+
+      if (
+        highlightOpts.enabled &&
+        highlightResult.method === 'even' &&
+        highlightResult.detectionHitRate < highlightOpts.fallbackHitRate
+      ) {
+        this.logger.warn(
+          `Job ${jobId}: highlight detection hit rate ${(highlightResult.detectionHitRate * 100).toFixed(0)}% — using even snapshot spacing`,
+        );
       }
+
+      const snapshotPaths = await materializeHighlightSnapshots(
+        highlightResult.selections,
+        workDir,
+        processedPath,
+        bins,
+      );
 
       const prefix = `videos/${userId}/${jobId}`;
       const processedKey = `${prefix}/processed.webm`;
@@ -318,6 +357,115 @@ export class VideoProcessingService {
         snapshotKeys.push(key);
       }
 
+      const socialVariants: RenderedSocialVariant[] = [];
+      const smartCrop = smartCropOptionsFromConfig(videoCfg);
+      // Social exports use the original upload (no feed watermark).
+      const socialSourcePath = inputPath;
+      const subjectAnalysis = await analyzeSubjectTrack(
+        socialSourcePath,
+        workDir,
+        bins,
+        smartCrop,
+      );
+      if (
+        smartCrop.enabled &&
+        subjectAnalysis.sampleCount > 0 &&
+        subjectAnalysis.detectionHitRate === 0
+      ) {
+        this.logger.warn(
+          `Job ${jobId}: no person detections for smart crop; using fallback framing`,
+        );
+      }
+
+      const reframe916Path = join(workDir, 'reframed-916.mp4');
+      const reframe11Path = join(workDir, 'reframed-11.mp4');
+
+      await reframeVideoToTarget({
+        bins,
+        sourcePath: socialSourcePath,
+        workDir,
+        outputPath: reframe916Path,
+        targetWidth: 1080,
+        targetHeight: 1920,
+        sourceWidth: subjectAnalysis.sourceWidth,
+        sourceHeight: subjectAnalysis.sourceHeight,
+        durationSec: mainDurationSec,
+        h264Crf: videoCfg.socialH264Crf,
+        hasAudio,
+        track: subjectAnalysis.track,
+        smartCrop,
+      });
+
+      await reframeVideoToTarget({
+        bins,
+        sourcePath: socialSourcePath,
+        workDir,
+        outputPath: reframe11Path,
+        targetWidth: 1080,
+        targetHeight: 1080,
+        sourceWidth: subjectAnalysis.sourceWidth,
+        sourceHeight: subjectAnalysis.sourceHeight,
+        durationSec: mainDurationSec,
+        h264Crf: videoCfg.socialH264Crf,
+        hasAudio,
+        track: subjectAnalysis.track,
+        smartCrop,
+      });
+
+      for (const profile of SOCIAL_VIDEO_PROFILES) {
+        const reframedSourcePath =
+          profile.kind === 'post' ? reframe11Path : reframe916Path;
+        const { outputPath, durationSec: variantDurationSec } =
+          await renderSocialVariant({
+            bins,
+            reframedSourcePath,
+            workDir,
+            profile,
+            logoPath: socialOutroLogoPath,
+            outroDurationSec: videoCfg.socialOutroDurationSec,
+            outroFadeSec: 1.5,
+            h264Crf: videoCfg.socialH264Crf,
+            hasAudio,
+            mainDurationSec,
+          });
+
+        const thumbPath = join(workDir, `${profile.kind}-thumb.jpg`);
+        await extractSocialThumbnail(outputPath, thumbPath, bins, 1);
+
+        const videoKey = `${prefix}/${profile.outputBasename}`;
+        const thumbnailKey = `${prefix}/social/${profile.kind}-thumb.jpg`;
+        await this.s3.uploadFile({
+          key: videoKey,
+          filePath: outputPath,
+          contentType: 'video/mp4',
+        });
+        await this.s3.uploadFile({
+          key: thumbnailKey,
+          filePath: thumbPath,
+          contentType: 'image/jpeg',
+        });
+
+        socialVariants.push({
+          kind: profile.kind,
+          label: profile.label,
+          aspectRatio: profile.aspectRatio,
+          videoKey,
+          thumbnailKey,
+          durationSec: variantDurationSec,
+        });
+      }
+
+      const metaSocialVariants: VideoJobMetaSocialVariant[] = socialVariants.map(
+        (v) => ({
+          kind: v.kind,
+          label: v.label,
+          aspectRatio: v.aspectRatio,
+          videoKey: v.videoKey,
+          thumbnailKey: v.thumbnailKey,
+          durationSec: v.durationSec,
+        }),
+      );
+
       const meta: VideoJobMeta = {
         userId,
         jobId,
@@ -325,6 +473,11 @@ export class VideoProcessingService {
         originalFilename,
         processedKey,
         snapshotKeys,
+        socialVariants: metaSocialVariants,
+        subjectTrackSampleCount: subjectAnalysis.sampleCount,
+        subjectTrackDetectionHitRate: subjectAnalysis.detectionHitRate,
+        highlightSnapshotMethod: highlightResult.method,
+        highlightDetectionHitRate: highlightResult.detectionHitRate,
         surfSessionId: surfSessionId ?? null,
       };
       await this.s3.putJson(`${prefix}/meta.json`, meta);
@@ -344,6 +497,7 @@ export class VideoProcessingService {
           $set: {
             processedKey,
             snapshotKeys,
+            socialVariants: metaSocialVariants,
             status: 'completed',
             ...publishPatch,
           },

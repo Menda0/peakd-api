@@ -12,6 +12,33 @@ export type VideoUploadSource = (typeof VIDEO_UPLOAD_SOURCES)[number];
 export const VIDEO_CLAIM_STATUSES = ['none', 'auto', 'claimed'] as const;
 export type VideoClaimStatus = (typeof VIDEO_CLAIM_STATUSES)[number];
 
+export const SOCIAL_VARIANT_KINDS = ['reel', 'story', 'post'] as const;
+export type SocialVariantKind = (typeof SOCIAL_VARIANT_KINDS)[number];
+
+@Schema({ _id: false })
+export class SocialVideoVariant {
+  @Prop({ type: String, enum: SOCIAL_VARIANT_KINDS, required: true })
+  kind: SocialVariantKind;
+
+  @Prop({ required: true })
+  label: string;
+
+  @Prop({ required: true })
+  aspectRatio: string;
+
+  @Prop({ required: true })
+  videoKey: string;
+
+  @Prop({ required: true })
+  thumbnailKey: string;
+
+  @Prop({ type: Number })
+  durationSec?: number;
+}
+
+export const SocialVideoVariantSchema =
+  SchemaFactory.createForClass(SocialVideoVariant);
+
 @Schema({ collection: 'video_jobs' })
 export class VideoJob {
   @Prop({ required: true, index: true })
@@ -33,6 +60,10 @@ export class VideoJob {
 
   @Prop({ type: [String], default: [] })
   snapshotKeys: string[];
+
+  /** MP4 exports for social platforms (reel/story/post). */
+  @Prop({ type: [SocialVideoVariantSchema], default: [] })
+  socialVariants: SocialVideoVariant[];
 
   /** ISO 8601 string, aligned with S3 meta.json */
   @Prop({ required: true })

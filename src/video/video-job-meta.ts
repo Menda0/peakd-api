@@ -1,3 +1,14 @@
+import type { SocialVariantKind } from './social-video.types';
+
+export type VideoJobMetaSocialVariant = {
+  kind: SocialVariantKind;
+  label: string;
+  aspectRatio: string;
+  videoKey: string;
+  thumbnailKey: string;
+  durationSec?: number;
+};
+
 /** Stored at `videos/{userId}/{jobId}/meta.json` in S3 */
 export interface VideoJobMeta {
   userId: string;
@@ -6,5 +17,10 @@ export interface VideoJobMeta {
   originalFilename: string;
   processedKey: string;
   snapshotKeys: string[];
+  socialVariants?: VideoJobMetaSocialVariant[];
+  subjectTrackSampleCount?: number;
+  subjectTrackDetectionHitRate?: number;
+  highlightSnapshotMethod?: 'tier2' | 'even';
+  highlightDetectionHitRate?: number;
   surfSessionId?: string | null;
 }

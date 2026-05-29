@@ -24,6 +24,10 @@ import { S3Service } from '../s3/s3.service';
 import { VideoShaka } from '../feed/schemas/video-shaka.schema';
 import { VideoJob } from '../video/schemas/video-job.schema';
 import {
+  mapSocialVariantsForResponse,
+  type SocialVariantResponseDto,
+} from '../video/video-social-variant.dto';
+import {
   isUndisclosedRegionId,
   isUndisclosedSpotId,
 } from './geo-undisclosed';
@@ -44,6 +48,7 @@ export type PublicSharedSessionWaveDto = {
   snapshotUrls: string[];
   videoUrl: string | null;
   processedDownloadUrl: string | null;
+  socialVariants: SocialVariantResponseDto[];
   hasOriginal: boolean;
   originalDownloadUrl: string | null;
   claimStatus: 'none' | 'claimed' | 'auto';
@@ -430,6 +435,7 @@ export class SharedSessionService {
 
       let videoUrl: string | null = processedDownloadUrl;
       let processedDownload: string | null = processedDownloadUrl;
+      let socialMediaUnlocked = true;
       let originalDownload: string | null =
         hasOriginal && rawKey
           ? await this.s3.presignedGetUrlRaw(rawKey)
@@ -473,6 +479,7 @@ export class SharedSessionService {
         const showVideo =
           extras.videoUnlockedByViewer || viewerIsSessionOwner;
         const showDownloads = showVideo;
+        socialMediaUnlocked = showDownloads;
         videoUrl = showVideo ? processedDownloadUrl : null;
         processedDownload = showDownloads ? processedDownloadUrl : null;
         if (!showDownloads) {
@@ -482,6 +489,14 @@ export class SharedSessionService {
 
       const viewerIsSessionOwner =
         Boolean(viewerId) && viewerId === session.userId;
+      const socialVariants = await mapSocialVariantsForResponse(
+        doc.socialVariants,
+        (key) => this.s3.presignedGetUrl(key),
+        {
+          includeDownloads: socialMediaUnlocked,
+          includePlayback: socialMediaUnlocked,
+        },
+      );
       const waveHasOriginal = isCommercial
         ? hasOriginal &&
           (commercialFields.videoUnlockedByViewer || viewerIsSessionOwner)
@@ -497,6 +512,7 @@ export class SharedSessionService {
         snapshotUrls: commercialFields.snapshotUrls,
         videoUrl,
         processedDownloadUrl: processedDownload,
+        socialVariants,
         hasOriginal: waveHasOriginal,
         originalDownloadUrl: originalDownload,
         claimStatus,

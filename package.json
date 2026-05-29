@@ -27,8 +27,10 @@
     "express-oauth2-jwt-bearer": "^1.8.0",
     "mongoose": "^9.6.2",
     "multer": "^1.4.5-lts.1",
+    "onnxruntime-node": "^1.26.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
+    "sharp": "^0.34.5",
     "stripe": "^18.5.0",
     "uuid": "^11.1.0"
   },

@@ -23,6 +23,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 COPY --from=build /app/dist ./dist
+COPY assets ./assets
 
 EXPOSE 3001
 CMD ["node", "dist/main.js"]
