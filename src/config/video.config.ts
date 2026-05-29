@@ -11,6 +11,15 @@ export interface VideoConfigValues {
   socialOutroDurationSec: number;
   /** H.264 CRF for social MP4 variants (lower = higher quality). */
   socialH264Crf: number;
+  socialSmartCropEnabled: boolean;
+  socialTrackSampleFps: number;
+  socialTrackMaxSampleFrames: number;
+  socialTrackSmoothing: number;
+  socialTrackMinConfidence: number;
+  socialTrackMaxPanPxPerSec: number;
+  socialTrackFallbackCenterY: number;
+  socialTrackSendcmdIntervalSec: number;
+  socialDetectorModelPath: string;
   /** Executable for ffmpeg (name on PATH or absolute path) */
   ffmpegBin: string;
   /** Executable for ffprobe (name on PATH or absolute path) */
@@ -46,6 +55,40 @@ export const videoConfig = registerAs(
       35,
       Math.max(18, Number(process.env.SOCIAL_H264_CRF ?? 23)),
     ),
+    socialSmartCropEnabled:
+      (process.env.SOCIAL_SMART_CROP_ENABLED ?? 'true').trim().toLowerCase() !==
+      'false',
+    socialTrackSampleFps: Math.min(
+      10,
+      Math.max(1, Number(process.env.SOCIAL_TRACK_SAMPLE_FPS ?? 4)),
+    ),
+    socialTrackMaxSampleFrames: Math.min(
+      240,
+      Math.max(10, Number(process.env.SOCIAL_TRACK_MAX_SAMPLE_FRAMES ?? 120)),
+    ),
+    socialTrackSmoothing: Math.min(
+      1,
+      Math.max(0.05, Number(process.env.SOCIAL_TRACK_SMOOTHING ?? 0.25)),
+    ),
+    socialTrackMinConfidence: Math.min(
+      0.95,
+      Math.max(0.1, Number(process.env.SOCIAL_TRACK_MIN_CONFIDENCE ?? 0.45)),
+    ),
+    socialTrackMaxPanPxPerSec: Math.min(
+      4000,
+      Math.max(50, Number(process.env.SOCIAL_TRACK_MAX_PAN_PX_PER_SEC ?? 900)),
+    ),
+    socialTrackFallbackCenterY: Math.min(
+      0.9,
+      Math.max(0.1, Number(process.env.SOCIAL_TRACK_FALLBACK_CENTER_Y ?? 0.58)),
+    ),
+    socialTrackSendcmdIntervalSec: Math.min(
+      1,
+      Math.max(0.05, Number(process.env.SOCIAL_TRACK_SENDCMD_INTERVAL_SEC ?? 0.1)),
+    ),
+    socialDetectorModelPath:
+      process.env.SOCIAL_DETECTOR_MODEL_PATH?.trim() ||
+      join(process.cwd(), 'assets/models/yolov8n.onnx'),
     ffmpegBin: (process.env.FFMPEG_PATH ?? 'ffmpeg').trim() || 'ffmpeg',
     ffprobeBin: (process.env.FFPROBE_PATH ?? 'ffprobe').trim() || 'ffprobe',
     maxUploadBytes: Number(process.env.MAX_UPLOAD_MB ?? 500) * 1024 * 1024,

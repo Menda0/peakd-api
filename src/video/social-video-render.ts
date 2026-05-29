@@ -6,7 +6,8 @@ import type { SocialVideoProfile } from './social-video.types';
 
 export type SocialRenderOptions = {
   bins: FfmpegBinaries;
-  sourcePath: string;
+  /** Pre-reframed main clip (target aspect, no outro). */
+  reframedSourcePath: string;
   workDir: string;
   profile: SocialVideoProfile;
   logoPath: string;
@@ -18,14 +19,14 @@ export type SocialRenderOptions = {
 };
 
 /**
- * Renders one social MP4: scale/crop to profile, append branded fade-in outro.
+ * Appends branded outro to a pre-reframed clip and muxes audio.
  */
 export async function renderSocialVariant(
   opts: SocialRenderOptions,
 ): Promise<{ outputPath: string; durationSec: number }> {
   const {
     bins,
-    sourcePath,
+    reframedSourcePath,
     workDir,
     profile,
     logoPath,
@@ -37,37 +38,11 @@ export async function renderSocialVariant(
   } = opts;
 
   const { kind, width, height } = profile;
-  const scaledPath = join(workDir, `${kind}-scaled.mp4`);
   const outroCardPath = join(workDir, `${kind}-outro-card.png`);
   const outroPath = join(workDir, `${kind}-outro.mp4`);
   const outputPath = join(workDir, profile.outputBasename);
 
   const padColor = '0x0d1117';
-  // Cover the canvas: scale up to fill, center-crop overflow (no letterboxing).
-  const scaleFilter = `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},setsar=1,fps=30`;
-
-  const scaledArgs = [
-    '-y',
-    '-i',
-    sourcePath,
-    '-vf',
-    scaleFilter,
-    '-c:v',
-    'libx264',
-    '-preset',
-    'medium',
-    '-crf',
-    String(h264Crf),
-    '-pix_fmt',
-    'yuv420p',
-    ...(hasAudio
-      ? ['-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2']
-      : ['-an']),
-    '-movflags',
-    '+faststart',
-    scaledPath,
-  ];
-  await runFfmpeg(scaledArgs, bins);
 
   await buildSocialOutroCardPng({
     width,
@@ -123,7 +98,7 @@ export async function renderSocialVariant(
   const concatArgs = [
     '-y',
     '-i',
-    scaledPath,
+    reframedSourcePath,
     '-i',
     outroPath,
     '-filter_complex',

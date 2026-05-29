@@ -54,6 +54,8 @@ function runCmd(
 export interface FfprobeResult {
   durationSec: number;
   hasAudio: boolean;
+  videoWidth: number;
+  videoHeight: number;
 }
 
 export async function ffprobeJson(
@@ -76,7 +78,11 @@ export async function ffprobeJson(
 
   const data = JSON.parse(stdout) as {
     format?: { duration?: string };
-    streams?: Array<{ codec_type?: string }>;
+    streams?: Array<{
+      codec_type?: string;
+      width?: number;
+      height?: number;
+    }>;
   };
 
   const durationRaw = data.format?.duration;
@@ -87,10 +93,14 @@ export async function ffprobeJson(
     throw new Error('Could not read positive duration from ffprobe output');
   }
 
+  const videoStream = data.streams?.find((s) => s.codec_type === 'video');
+  const videoWidth = videoStream?.width ?? 0;
+  const videoHeight = videoStream?.height ?? 0;
+
   const hasAudio =
     data.streams?.some((s) => s.codec_type === 'audio') ?? false;
 
-  return { durationSec, hasAudio };
+  return { durationSec, hasAudio, videoWidth, videoHeight };
 }
 
 export async function runFfmpeg(

@@ -24,6 +24,11 @@ import {
 } from './schemas/video-job.schema';
 import { StudioService } from '../studio/studio.service';
 import { SOCIAL_VIDEO_PROFILES } from './social-video-profiles';
+import { reframeVideoToTarget } from './social-dynamic-crop';
+import {
+  analyzeSubjectTrack,
+  smartCropOptionsFromConfig,
+} from './social-subject-track';
 import {
   extractSocialThumbnail,
   renderSocialVariant,
@@ -343,20 +348,74 @@ export class VideoProcessingService {
       }
 
       const socialVariants: RenderedSocialVariant[] = [];
+      const smartCrop = smartCropOptionsFromConfig(videoCfg);
+      const subjectAnalysis = await analyzeSubjectTrack(
+        processedPath,
+        workDir,
+        bins,
+        smartCrop,
+      );
+      if (
+        smartCrop.enabled &&
+        subjectAnalysis.sampleCount > 0 &&
+        subjectAnalysis.detectionHitRate === 0
+      ) {
+        this.logger.warn(
+          `Job ${jobId}: no person detections for smart crop; using fallback framing`,
+        );
+      }
+
+      const reframe916Path = join(workDir, 'reframed-916.mp4');
+      const reframe11Path = join(workDir, 'reframed-11.mp4');
+
+      await reframeVideoToTarget({
+        bins,
+        sourcePath: processedPath,
+        workDir,
+        outputPath: reframe916Path,
+        targetWidth: 1080,
+        targetHeight: 1920,
+        sourceWidth: subjectAnalysis.sourceWidth,
+        sourceHeight: subjectAnalysis.sourceHeight,
+        durationSec: mainDurationSec,
+        h264Crf: videoCfg.socialH264Crf,
+        hasAudio,
+        track: subjectAnalysis.track,
+        smartCrop,
+      });
+
+      await reframeVideoToTarget({
+        bins,
+        sourcePath: processedPath,
+        workDir,
+        outputPath: reframe11Path,
+        targetWidth: 1080,
+        targetHeight: 1080,
+        sourceWidth: subjectAnalysis.sourceWidth,
+        sourceHeight: subjectAnalysis.sourceHeight,
+        durationSec: mainDurationSec,
+        h264Crf: videoCfg.socialH264Crf,
+        hasAudio,
+        track: subjectAnalysis.track,
+        smartCrop,
+      });
+
       for (const profile of SOCIAL_VIDEO_PROFILES) {
+        const reframedSourcePath =
+          profile.kind === 'post' ? reframe11Path : reframe916Path;
         const { outputPath, durationSec: variantDurationSec } =
           await renderSocialVariant({
-          bins,
-          sourcePath: processedPath,
-          workDir,
-          profile,
-          logoPath: socialOutroLogoPath,
-          outroDurationSec: videoCfg.socialOutroDurationSec,
-          outroFadeSec: 1.5,
-          h264Crf: videoCfg.socialH264Crf,
-          hasAudio,
-          mainDurationSec,
-        });
+            bins,
+            reframedSourcePath,
+            workDir,
+            profile,
+            logoPath: socialOutroLogoPath,
+            outroDurationSec: videoCfg.socialOutroDurationSec,
+            outroFadeSec: 1.5,
+            h264Crf: videoCfg.socialH264Crf,
+            hasAudio,
+            mainDurationSec,
+          });
 
         const thumbPath = join(workDir, `${profile.kind}-thumb.jpg`);
         await extractSocialThumbnail(outputPath, thumbPath, bins, 1);
@@ -403,6 +462,8 @@ export class VideoProcessingService {
         processedKey,
         snapshotKeys,
         socialVariants: metaSocialVariants,
+        subjectTrackSampleCount: subjectAnalysis.sampleCount,
+        subjectTrackDetectionHitRate: subjectAnalysis.detectionHitRate,
         surfSessionId: surfSessionId ?? null,
       };
       await this.s3.putJson(`${prefix}/meta.json`, meta);

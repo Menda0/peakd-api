@@ -18,5 +18,7 @@ export interface VideoJobMeta {
   processedKey: string;
   snapshotKeys: string[];
   socialVariants?: VideoJobMetaSocialVariant[];
+  subjectTrackSampleCount?: number;
+  subjectTrackDetectionHitRate?: number;
   surfSessionId?: string | null;
 }
