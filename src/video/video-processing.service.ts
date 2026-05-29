@@ -17,12 +17,18 @@ import { VIDEO_CONFIG, VideoConfigValues } from '../config/video.config';
 import { ffprobeJson, runFfmpeg } from '../ffmpeg/ffmpeg.helper';
 import { planSnapshotTimes } from './snapshot-planner';
 import { S3Service } from '../s3/s3.service';
-import type { VideoJobMeta } from './video-job-meta';
+import type { VideoJobMeta, VideoJobMetaSocialVariant } from './video-job-meta';
 import {
   VideoJob,
   type VideoUploadSource,
 } from './schemas/video-job.schema';
 import { StudioService } from '../studio/studio.service';
+import { SOCIAL_VIDEO_PROFILES } from './social-video-profiles';
+import {
+  extractSocialThumbnail,
+  renderSocialVariant,
+} from './social-video-render';
+import type { RenderedSocialVariant } from './social-video.types';
 
 export interface StartVideoJobResult {
   jobId: string;
@@ -54,6 +60,7 @@ type JobPipelineContext = {
   surfSessionId: string | null;
   createdAt: string;
   watermarkPath: string;
+  socialOutroLogoPath: string;
   videoCfg: VideoConfigValues;
 };
 
@@ -113,6 +120,20 @@ export class VideoProcessingService {
       );
     }
 
+    const socialOutroLogoPath = videoCfg.socialOutroLogoPath?.trim();
+    if (!socialOutroLogoPath) {
+      throw new InternalServerErrorException(
+        'SOCIAL_OUTRO_LOGO_PATH is not configured',
+      );
+    }
+    try {
+      await access(socialOutroLogoPath);
+    } catch {
+      throw new InternalServerErrorException(
+        `Social outro logo not readable: ${socialOutroLogoPath}`,
+      );
+    }
+
     const mime = file.mimetype ?? '';
     if (!videoCfg.allowedMimeTypes.includes(mime)) {
       throw new BadRequestException(
@@ -135,6 +156,7 @@ export class VideoProcessingService {
       surfSessionId: surfSessionId ?? null,
       status: 'processing',
       snapshotKeys: [],
+      socialVariants: [],
       rawOriginalKey: null,
       uploadSource,
       discoverPublishedAt: isPersonal ? createdAt : null,
@@ -152,6 +174,7 @@ export class VideoProcessingService {
       surfSessionId,
       createdAt,
       watermarkPath,
+      socialOutroLogoPath,
       videoCfg,
     };
 
@@ -180,6 +203,7 @@ export class VideoProcessingService {
       surfSessionId,
       createdAt,
       watermarkPath,
+      socialOutroLogoPath,
       videoCfg,
     } = ctx;
 
@@ -191,11 +215,11 @@ export class VideoProcessingService {
     const processedPath = join(workDir, 'processed.webm');
 
     try {
-      let durationSec: number;
+      let mainDurationSec: number;
       let hasAudio: boolean;
       try {
         const probe = await ffprobeJson(inputPath, bins);
-        durationSec = probe.durationSec;
+        mainDurationSec = probe.durationSec;
         hasAudio = probe.hasAudio;
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -218,7 +242,7 @@ export class VideoProcessingService {
         .updateOne({ jobId }, { $set: { rawOriginalKey } })
         .exec();
 
-      const snapshotTimes = planSnapshotTimes(durationSec, {
+      const snapshotTimes = planSnapshotTimes(mainDurationSec, {
         interiorStartRatio: videoCfg.interiorStartRatio,
         interiorEndRatio: videoCfg.interiorEndRatio,
         snapshotMinFrames: videoCfg.snapshotMinFrames,
@@ -318,6 +342,59 @@ export class VideoProcessingService {
         snapshotKeys.push(key);
       }
 
+      const socialVariants: RenderedSocialVariant[] = [];
+      for (const profile of SOCIAL_VIDEO_PROFILES) {
+        const { outputPath, durationSec: variantDurationSec } =
+          await renderSocialVariant({
+          bins,
+          sourcePath: processedPath,
+          workDir,
+          profile,
+          logoPath: socialOutroLogoPath,
+          outroDurationSec: videoCfg.socialOutroDurationSec,
+          outroFadeSec: 1.5,
+          h264Crf: videoCfg.socialH264Crf,
+          hasAudio,
+          mainDurationSec,
+        });
+
+        const thumbPath = join(workDir, `${profile.kind}-thumb.jpg`);
+        await extractSocialThumbnail(outputPath, thumbPath, bins, 1);
+
+        const videoKey = `${prefix}/${profile.outputBasename}`;
+        const thumbnailKey = `${prefix}/social/${profile.kind}-thumb.jpg`;
+        await this.s3.uploadFile({
+          key: videoKey,
+          filePath: outputPath,
+          contentType: 'video/mp4',
+        });
+        await this.s3.uploadFile({
+          key: thumbnailKey,
+          filePath: thumbPath,
+          contentType: 'image/jpeg',
+        });
+
+        socialVariants.push({
+          kind: profile.kind,
+          label: profile.label,
+          aspectRatio: profile.aspectRatio,
+          videoKey,
+          thumbnailKey,
+          durationSec: variantDurationSec,
+        });
+      }
+
+      const metaSocialVariants: VideoJobMetaSocialVariant[] = socialVariants.map(
+        (v) => ({
+          kind: v.kind,
+          label: v.label,
+          aspectRatio: v.aspectRatio,
+          videoKey: v.videoKey,
+          thumbnailKey: v.thumbnailKey,
+          durationSec: v.durationSec,
+        }),
+      );
+
       const meta: VideoJobMeta = {
         userId,
         jobId,
@@ -325,6 +402,7 @@ export class VideoProcessingService {
         originalFilename,
         processedKey,
         snapshotKeys,
+        socialVariants: metaSocialVariants,
         surfSessionId: surfSessionId ?? null,
       };
       await this.s3.putJson(`${prefix}/meta.json`, meta);
@@ -344,6 +422,7 @@ export class VideoProcessingService {
           $set: {
             processedKey,
             snapshotKeys,
+            socialVariants: metaSocialVariants,
             status: 'completed',
             ...publishPatch,
           },

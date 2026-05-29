@@ -22,6 +22,10 @@ import { UserProfile } from '../users/schemas/user-profile.schema';
 import { S3Service } from '../s3/s3.service';
 import { VideoJob } from '../video/schemas/video-job.schema';
 import {
+  mapSocialVariantsForResponse,
+  type SocialVariantResponseDto,
+} from '../video/video-social-variant.dto';
+import {
   isUndisclosedRegionId,
   isUndisclosedSpotId,
 } from './geo-undisclosed';
@@ -42,6 +46,7 @@ export type PublicSharedSessionWaveDto = {
   snapshotUrls: string[];
   videoUrl: string | null;
   processedDownloadUrl: string | null;
+  socialVariants: SocialVariantResponseDto[];
   hasOriginal: boolean;
   originalDownloadUrl: string | null;
   claimStatus: 'none' | 'claimed' | 'auto';
@@ -369,6 +374,7 @@ export class SharedSessionService {
 
       let videoUrl: string | null = processedDownloadUrl;
       let processedDownload: string | null = processedDownloadUrl;
+      let socialMediaUnlocked = true;
       let originalDownload: string | null =
         hasOriginal && rawKey
           ? await this.s3.presignedGetUrlRaw(rawKey)
@@ -408,12 +414,22 @@ export class SharedSessionService {
         };
         canClaim = viewerId ? extras.canClaim : false;
         const showVideo = extras.videoUnlockedByViewer;
+        socialMediaUnlocked = showVideo;
         videoUrl = showVideo ? processedDownloadUrl : null;
         processedDownload = showVideo ? processedDownloadUrl : null;
         if (!showVideo) {
           originalDownload = null;
         }
       }
+
+      const socialVariants = await mapSocialVariantsForResponse(
+        doc.socialVariants,
+        (key) => this.s3.presignedGetUrl(key),
+        {
+          includeDownloads: socialMediaUnlocked,
+          includePlayback: socialMediaUnlocked,
+        },
+      );
 
       const waveHasOriginal = isCommercial
         ? commercialFields.videoUnlockedByViewer && hasOriginal
@@ -428,6 +444,7 @@ export class SharedSessionService {
         snapshotUrls: commercialFields.snapshotUrls,
         videoUrl,
         processedDownloadUrl: processedDownload,
+        socialVariants,
         hasOriginal: waveHasOriginal,
         originalDownloadUrl: originalDownload,
         claimStatus,

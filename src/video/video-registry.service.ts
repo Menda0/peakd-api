@@ -11,6 +11,10 @@ import { StudioService } from '../studio/studio.service';
 import { WaveUnlockOrder } from '../commercial/schemas/wave-unlock-order.schema';
 import { VideoJob } from './schemas/video-job.schema';
 import type { VideoJobStatus } from './schemas/video-job.schema';
+import {
+  mapSocialVariantsForResponse,
+  type SocialVariantResponseDto,
+} from './video-social-variant.dto';
 
 const LIST_THUMBNAIL_MAX = 4;
 
@@ -24,6 +28,8 @@ export interface VideoJobListItemDto {
   thumbnailUrl?: string;
   /** Up to four snapshot presigned URLs for list/detail previews. */
   thumbnailUrls: string[];
+  /** First social variant thumbnail when available. */
+  socialThumbnailUrl?: string | null;
   surfSessionId?: string | null;
   discoverPublishedAt?: string | null;
 }
@@ -37,6 +43,7 @@ export interface VideoJobDetailDto {
   processedKey?: string;
   videoUrl?: string;
   snapshots: Array<{ key: string; url: string }>;
+  socialVariants: SocialVariantResponseDto[];
   surfSessionId?: string | null;
 }
 
@@ -97,14 +104,19 @@ export class VideoRegistryService {
       for (const key of snapKeys) {
         thumbnailUrls.push(await this.s3.presignedGetUrl(key));
       }
+      const firstSocialThumb =
+        status === 'completed' && doc.socialVariants?.[0]?.thumbnailKey
+          ? await this.s3.presignedGetUrl(doc.socialVariants[0].thumbnailKey)
+          : null;
       items.push({
         jobId: doc.jobId,
         originalFilename: doc.originalFilename ?? 'video',
         createdAt: doc.createdAt,
         status,
         errorMessage: doc.errorMessage ?? null,
-        thumbnailUrl: thumbnailUrls[0],
+        thumbnailUrl: thumbnailUrls[0] ?? firstSocialThumb ?? undefined,
         thumbnailUrls,
+        socialThumbnailUrl: firstSocialThumb,
         surfSessionId: doc.surfSessionId ?? null,
         discoverPublishedAt: doc.discoverPublishedAt ?? null,
       });
@@ -132,6 +144,7 @@ export class VideoRegistryService {
         status: 'processing',
         errorMessage: null,
         snapshots: [],
+        socialVariants: [],
         surfSessionId: doc.surfSessionId ?? null,
       };
     }
@@ -144,6 +157,7 @@ export class VideoRegistryService {
         status: 'failed',
         errorMessage: doc.errorMessage ?? 'Processing failed',
         snapshots: [],
+        socialVariants: [],
         surfSessionId: doc.surfSessionId ?? null,
       };
     }
@@ -156,6 +170,7 @@ export class VideoRegistryService {
         status: 'processing',
         errorMessage: null,
         snapshots: [],
+        socialVariants: [],
         surfSessionId: doc.surfSessionId ?? null,
       };
     }
@@ -169,6 +184,12 @@ export class VideoRegistryService {
       });
     }
 
+    const socialVariants = await mapSocialVariantsForResponse(
+      doc.socialVariants,
+      (key) => this.s3.presignedGetUrl(key),
+      { includeDownloads: true, includePlayback: true },
+    );
+
     return {
       jobId: doc.jobId,
       originalFilename: doc.originalFilename ?? 'video',
@@ -178,6 +199,7 @@ export class VideoRegistryService {
       processedKey: doc.processedKey,
       videoUrl,
       snapshots,
+      socialVariants,
       surfSessionId: doc.surfSessionId ?? null,
     };
   }

@@ -1,9 +1,16 @@
 import { registerAs } from '@nestjs/config';
+import { join } from 'node:path';
 
 export const VIDEO_CONFIG = 'video';
 
 export interface VideoConfigValues {
   watermarkImagePath: string;
+  /** Logo for social outro card (defaults to assets/social-outro-logo.png). */
+  socialOutroLogoPath: string;
+  /** Branded end-card duration appended to social MP4 exports. */
+  socialOutroDurationSec: number;
+  /** H.264 CRF for social MP4 variants (lower = higher quality). */
+  socialH264Crf: number;
   /** Executable for ffmpeg (name on PATH or absolute path) */
   ffmpegBin: string;
   /** Executable for ffprobe (name on PATH or absolute path) */
@@ -28,6 +35,17 @@ export const videoConfig = registerAs(
   VIDEO_CONFIG,
   (): VideoConfigValues => ({
     watermarkImagePath: process.env.WATERMARK_IMAGE_PATH ?? '',
+    socialOutroLogoPath:
+      process.env.SOCIAL_OUTRO_LOGO_PATH?.trim() ||
+      join(process.cwd(), 'assets/social-outro-logo.png'),
+    socialOutroDurationSec: Math.min(
+      8,
+      Math.max(1, Number(process.env.SOCIAL_OUTRO_DURATION_SEC ?? 3)),
+    ),
+    socialH264Crf: Math.min(
+      35,
+      Math.max(18, Number(process.env.SOCIAL_H264_CRF ?? 23)),
+    ),
     ffmpegBin: (process.env.FFMPEG_PATH ?? 'ffmpeg').trim() || 'ffmpeg',
     ffprobeBin: (process.env.FFPROBE_PATH ?? 'ffprobe').trim() || 'ffprobe',
     maxUploadBytes: Number(process.env.MAX_UPLOAD_MB ?? 500) * 1024 * 1024,
