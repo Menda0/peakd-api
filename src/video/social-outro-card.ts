@@ -10,10 +10,12 @@ export async function buildSocialOutroCardPng(options: {
   const { width, height, logoPath, outputPath } = options;
   const logoWidth = Math.round(width * 0.55);
   const fontSize = Math.max(24, Math.round(height / 28));
+  const textPaddingY = Math.round(fontSize * 0.35);
+  const textBlockHeight = Math.round(fontSize * 1.35) + textPaddingY * 2;
 
   const textSvg = Buffer.from(
-    `<svg width="${width}" height="${fontSize + 24}" xmlns="http://www.w3.org/2000/svg">
-      <text x="50%" y="${fontSize}" text-anchor="middle" dominant-baseline="hanging"
+    `<svg width="${width}" height="${textBlockHeight}" viewBox="0 0 ${width} ${textBlockHeight}" xmlns="http://www.w3.org/2000/svg">
+      <text x="${width / 2}" y="${textBlockHeight / 2}" text-anchor="middle" dominant-baseline="middle"
         fill="#ffffff" font-size="${fontSize}" font-family="Arial, Helvetica, sans-serif">
         more at peakd.surf
       </text>
@@ -31,12 +33,13 @@ export async function buildSocialOutroCardPng(options: {
 
   const textMeta = await sharp(textSvg).metadata();
   const textBuf = await sharp(textSvg).png().toBuffer();
-  const textWidth = textMeta.width ?? width;
-  const textHeight = textMeta.height ?? fontSize + 24;
+  const textHeight = textMeta.height ?? textBlockHeight;
 
   const logoTop = Math.round(height * 0.35 - logoHeight / 2);
   const textGap = Math.max(16, Math.round(height * 0.02));
-  const textTop = logoTop + logoHeight + textGap;
+  const minTextTop = logoTop + logoHeight + textGap;
+  const maxTextTop = height - textHeight - Math.round(height * 0.04);
+  const textTop = Math.max(0, Math.min(minTextTop, maxTextTop));
 
   await sharp({
     create: {
@@ -55,7 +58,7 @@ export async function buildSocialOutroCardPng(options: {
       {
         input: textBuf,
         top: textTop,
-        left: Math.round((width - textWidth) / 2),
+        left: 0,
       },
     ])
     .png()
