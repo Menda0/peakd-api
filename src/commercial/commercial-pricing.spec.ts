@@ -4,6 +4,7 @@ import {
   computeBuyClaimMinor,
   computeCheckoutTotalMinor,
   computeSponsorMinor,
+  isCommercialVideoUnlockedForViewer,
   normalizeVolumeDiscounts,
   parseCommercialSettings,
   PLATFORM_COMMISSION_PERCENT_DEFAULT,
@@ -249,6 +250,45 @@ describe('splitIntegerTotal', () => {
     expect(splitIntegerTotal(10, 3)).toEqual([4, 3, 3]);
     expect(splitIntegerTotal(11, 3)).toEqual([4, 4, 3]);
     expect(splitIntegerTotal(0, 5)).toEqual([0, 0, 0, 0, 0]);
+  });
+});
+
+describe('isCommercialVideoUnlockedForViewer', () => {
+  it('is true for the beneficiary surfer', () => {
+    expect(
+      isCommercialVideoUnlockedForViewer({
+        videoUnlockedForUserId: 'surfer-1',
+        viewerUserId: 'surfer-1',
+        sessionOwnerUserId: 'partner-1',
+      }),
+    ).toBe(true);
+  });
+
+  it('is true for the session owner when any surfer unlocked', () => {
+    expect(
+      isCommercialVideoUnlockedForViewer({
+        videoUnlockedForUserId: 'surfer-1',
+        viewerUserId: 'partner-1',
+        sessionOwnerUserId: 'partner-1',
+      }),
+    ).toBe(true);
+  });
+
+  it('is false for other viewers and when not unlocked', () => {
+    expect(
+      isCommercialVideoUnlockedForViewer({
+        videoUnlockedForUserId: 'surfer-1',
+        viewerUserId: 'other-1',
+        sessionOwnerUserId: 'partner-1',
+      }),
+    ).toBe(false);
+    expect(
+      isCommercialVideoUnlockedForViewer({
+        videoUnlockedForUserId: null,
+        viewerUserId: 'partner-1',
+        sessionOwnerUserId: 'partner-1',
+      }),
+    ).toBe(false);
   });
 });
 
