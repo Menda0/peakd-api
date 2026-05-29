@@ -386,7 +386,7 @@ export class FeedService {
 
   private async getShakaInfo(
     jobIds: string[],
-    viewerUserId: string,
+    viewerUserId: string | null,
   ): Promise<Map<string, { count: number; viewerShaka: boolean }>> {
     const result = new Map<string, { count: number; viewerShaka: boolean }>();
     const ids = Array.from(new Set(jobIds.filter((id) => id?.trim())));
@@ -401,10 +401,12 @@ export class FeedService {
           { $group: { _id: '$jobId', count: { $sum: 1 } } },
         ])
         .exec(),
-      this.videoShakaModel
-        .find({ jobId: { $in: ids }, userId: viewerUserId })
-        .lean()
-        .exec(),
+      viewerUserId
+        ? this.videoShakaModel
+            .find({ jobId: { $in: ids }, userId: viewerUserId })
+            .lean()
+            .exec()
+        : Promise.resolve([]),
     ]);
     for (const row of counts) {
       const entry = result.get(row._id);
@@ -1354,7 +1356,12 @@ export class FeedService {
     return items;
   }
 
-  async listMyVideos(userId: string): Promise<MyVideoItemDto[]> {
+  async listMyVideos(
+    userId: string,
+    options?: { viewerUserId?: string | null },
+  ): Promise<MyVideoItemDto[]> {
+    const viewerUserId =
+      options && 'viewerUserId' in options ? options.viewerUserId : userId;
     const [personalRows, claimedRows] = await Promise.all([
       this.videoJobModel
         .find({ userId, uploadSource: 'personal' })
@@ -1383,14 +1390,14 @@ export class FeedService {
 
     const shakaInfo = await this.getShakaInfo(
       sorted.map((d) => d.jobId),
-      userId,
+      viewerUserId ?? null,
     );
     const items: MyVideoItemDto[] = [];
     for (const doc of sorted) {
       const dto = await this.docToDiscoverDto(
         doc,
         this.normalizeStatus(doc),
-        userId,
+        viewerUserId ?? '',
         shakaInfo,
       );
       const isViewerSurfer =
@@ -1428,6 +1435,11 @@ export class FeedService {
       });
     }
     return items;
+  }
+
+  async listMyVideosForPublicProfile(userId: string): Promise<MyVideoItemDto[]> {
+    const items = await this.listMyVideos(userId, { viewerUserId: null });
+    return items.filter((item) => item.status === 'completed');
   }
 
   async listDiscoverFeed(

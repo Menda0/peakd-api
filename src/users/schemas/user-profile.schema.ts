@@ -15,6 +15,10 @@ export class UserProfile {
   @Prop({ type: String, default: null })
   nickname: string | null;
 
+  /** Unique public handle (lowercase, no `@`). */
+  @Prop({ type: String, default: null, sparse: true, unique: true, index: true })
+  handle: string | null;
+
   /** ISO 3166-1 alpha-2 */
   @Prop({ type: String, default: null })
   countryCode: string | null;

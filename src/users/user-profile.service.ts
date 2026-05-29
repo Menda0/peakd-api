@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import { randomUUID } from 'node:crypto';
@@ -7,12 +7,19 @@ import { Model } from 'mongoose';
 import { S3Service } from '../s3/s3.service';
 import { StudioService } from '../studio/studio.service';
 import { UserProfile } from './schemas/user-profile.schema';
+import {
+  handleCandidatesFromBase,
+  normalizeHandleInput,
+  sanitizeEmailLocalPartToHandleBase,
+  validateHandleFormat,
+} from './handle.utils';
 
 export type SurfLevel = 'beginner' | 'intermediate' | 'advanced';
 
 export interface UserProfileResponseDto {
   displayName: string | null;
   nickname: string | null;
+  handle: string | null;
   countryCode: string | null;
   homeRegionId: string | null;
   homeRegionName: string | null;
@@ -23,6 +30,7 @@ export interface UserProfileResponseDto {
 export interface UserProfilePatchBody {
   displayName?: string | null;
   nickname?: string | null;
+  handle?: string | null;
   countryCode?: string | null;
   homeRegionId?: string | null;
   surfLevel?: string | null;
@@ -107,6 +115,7 @@ export class UserProfileService {
     userId?: string;
     displayName: string | null;
     nickname: string | null;
+    handle?: string | null;
     countryCode: string | null;
     homeRegionId: string | null;
     surfLevel: string | null;
@@ -119,6 +128,7 @@ export class UserProfileService {
     return {
       displayName: doc.displayName,
       nickname: doc.nickname,
+      handle: doc.handle ?? null,
       countryCode: doc.countryCode,
       homeRegionId: doc.homeRegionId,
       homeRegionName: await this.resolveHomeRegionName(
@@ -130,13 +140,122 @@ export class UserProfileService {
     };
   }
 
-  async getMe(userId: string): Promise<UserProfileResponseDto> {
+  private parseHandle(raw: unknown): string {
+    if (typeof raw !== 'string') {
+      throw new BadRequestException('handle must be a string');
+    }
+    const handle = normalizeHandleInput(raw);
+    if (!handle) {
+      throw new BadRequestException('handle cannot be empty');
+    }
+    try {
+      validateHandleFormat(handle);
+    } catch (e) {
+      throw new BadRequestException(
+        e instanceof Error ? e.message : 'Invalid handle',
+      );
+    }
+    return handle;
+  }
+
+  private async isHandleTaken(
+    handle: string,
+    excludeUserId?: string,
+  ): Promise<boolean> {
+    const filter: Record<string, unknown> = { handle };
+    if (excludeUserId) {
+      filter.userId = { $ne: excludeUserId };
+    }
+    const existing = await this.userProfileModel.findOne(filter).lean().exec();
+    return Boolean(existing);
+  }
+
+  async generateUniqueHandleFromEmail(
+    email: string,
+    userId?: string,
+  ): Promise<string> {
+    const base = sanitizeEmailLocalPartToHandleBase(email);
+    const candidates = handleCandidatesFromBase(base);
+    for (const candidate of candidates) {
+      if (!(await this.isHandleTaken(candidate, userId))) {
+        return candidate;
+      }
+    }
+    const fallback = `user_${userId ? userId.replace(/[^a-z0-9]/gi, '').slice(-8).toLowerCase() : Date.now().toString(36)}`;
+    const trimmed =
+      fallback.length > 30 ? fallback.slice(0, 30) : fallback;
+    if (!(await this.isHandleTaken(trimmed, userId))) {
+      return trimmed;
+    }
+    return `${trimmed.slice(0, 24)}_${Date.now().toString(36).slice(-5)}`;
+  }
+
+  private async ensureHandleForProfile(
+    userId: string,
+    email: string | null | undefined,
+  ): Promise<void> {
+    if (!email?.trim()) return;
+    const doc = await this.userProfileModel.findOne({ userId }).lean().exec();
+    if (!doc || doc.handle) return;
+    const handle = await this.generateUniqueHandleFromEmail(email.trim(), userId);
+    try {
+      await this.userProfileModel
+        .updateOne({ userId, handle: null }, { $set: { handle } })
+        .exec();
+    } catch (e) {
+      const code = (e as { code?: number }).code;
+      if (code === 11000) {
+        const retry = await this.generateUniqueHandleFromEmail(
+          `${email.trim()}.${Date.now()}`,
+          userId,
+        );
+        await this.userProfileModel
+          .updateOne({ userId, handle: null }, { $set: { handle: retry } })
+          .exec();
+      }
+    }
+  }
+
+  async findByHandle(handle: string): Promise<{
+    userId: string;
+    displayName: string | null;
+    nickname: string | null;
+    handle: string;
+    countryCode: string | null;
+    homeRegionId: string | null;
+    surfLevel: string | null;
+    avatarKey: string | null;
+  } | null> {
+    const normalized = normalizeHandleInput(handle);
+    if (!normalized) return null;
+    const doc = await this.userProfileModel
+      .findOne({ handle: normalized })
+      .lean()
+      .exec();
+    if (!doc?.handle) return null;
+    return {
+      userId: doc.userId,
+      displayName: doc.displayName,
+      nickname: doc.nickname,
+      handle: doc.handle,
+      countryCode: doc.countryCode,
+      homeRegionId: doc.homeRegionId,
+      surfLevel: doc.surfLevel,
+      avatarKey: doc.avatarKey ?? null,
+    };
+  }
+
+  async getMe(
+    userId: string,
+    email?: string | null,
+  ): Promise<UserProfileResponseDto> {
     let doc = await this.userProfileModel.findOne({ userId }).lean().exec();
     if (!doc) {
       await this.userProfileModel.create({
         userId,
         displayName: null,
         nickname: null,
+        handle: null,
         countryCode: null,
         homeRegionId: null,
         surfLevel: null,
@@ -144,6 +263,21 @@ export class UserProfileService {
       });
       doc = await this.userProfileModel.findOne({ userId }).lean().exec();
     }
+    if (!doc) {
+      throw new NotFoundException('User profile');
+    }
+    if (!doc.handle) {
+      await this.ensureHandleForProfile(userId, email);
+      doc = await this.userProfileModel.findOne({ userId }).lean().exec();
+    }
+    if (!doc) {
+      throw new NotFoundException('User profile');
+    }
+    return this.toDto(doc);
+  }
+
+  async getProfileDto(userId: string): Promise<UserProfileResponseDto> {
+    const doc = await this.userProfileModel.findOne({ userId }).lean().exec();
     if (!doc) {
       throw new NotFoundException('User profile');
     }
@@ -161,6 +295,19 @@ export class UserProfileService {
     }
 
     const patch: Record<string, unknown> = {};
+
+    if ('handle' in body) {
+      if (body.handle === null || body.handle === undefined) {
+        throw new BadRequestException('handle cannot be null');
+      }
+      const handle = this.parseHandle(body.handle);
+      if (handle !== base.handle) {
+        if (await this.isHandleTaken(handle, userId)) {
+          throw new ConflictException('Handle already taken');
+        }
+        patch.handle = handle;
+      }
+    }
 
     if ('displayName' in body) {
       if (body.displayName === null || body.displayName === undefined) {
@@ -278,6 +425,7 @@ export class UserProfileService {
       userId,
       displayName: null,
       nickname: null,
+      handle: null,
       countryCode: null,
       homeRegionId: null,
       surfLevel: null,
@@ -287,14 +435,22 @@ export class UserProfileService {
       Object.entries(defaultsOnInsert).filter(([key]) => !(key in patch)),
     );
 
-    const updated = await this.userProfileModel
-      .findOneAndUpdate(
-        { userId },
-        { $set: patch, $setOnInsert: setOnInsert },
-        { upsert: true, returnDocument: 'after' },
-      )
-      .lean()
-      .exec();
+    let updated;
+    try {
+      updated = await this.userProfileModel
+        .findOneAndUpdate(
+          { userId },
+          { $set: patch, $setOnInsert: setOnInsert },
+          { upsert: true, returnDocument: 'after' },
+        )
+        .lean()
+        .exec();
+    } catch (e) {
+      if ((e as { code?: number }).code === 11000 && 'handle' in patch) {
+        throw new ConflictException('Handle already taken');
+      }
+      throw e;
+    }
 
     if (!updated) {
       throw new NotFoundException('User profile');

@@ -34,5 +34,6 @@ import { VideoShaka, VideoShakaSchema } from './schemas/video-shaka.schema';
   ],
   controllers: [FeedController],
   providers: [FeedService, Auth0JwtGuard],
+  exports: [FeedService],
 })
 export class FeedModule {}
