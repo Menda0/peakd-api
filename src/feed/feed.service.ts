@@ -1438,7 +1438,7 @@ export class FeedService {
   }
 
   async listMyVideosForPublicProfile(userId: string): Promise<MyVideoItemDto[]> {
-    const items = await this.listMyVideos(userId, { viewerUserId: null });
+    const items = await this.listMyVideos(userId, { viewerUserId: userId });
     return items.filter((item) => item.status === 'completed');
   }
 
