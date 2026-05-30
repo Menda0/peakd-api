@@ -166,6 +166,22 @@ export function computeSponsorMinor(
 }
 
 /**
+ * Whether the viewer may stream/download a commercial wave.
+ * The buyer who unlocked it always qualifies; the session owner (partner)
+ * qualifies when any surfer has unlocked the wave.
+ */
+export function isCommercialVideoUnlockedForViewer(params: {
+  videoUnlockedForUserId: string | null;
+  viewerUserId: string;
+  sessionOwnerUserId: string;
+}): boolean {
+  const unlockedFor = params.videoUnlockedForUserId?.trim() || null;
+  if (!unlockedFor) return false;
+  if (params.viewerUserId === params.sessionOwnerUserId) return true;
+  return unlockedFor === params.viewerUserId;
+}
+
+/**
  * Flat platform commission percent charged on top of the partner's
  * `videoPriceMinor` (after volume discount) at checkout.
  */
@@ -300,18 +316,4 @@ export function allocateBuyClaimLineBreakdownsMinor(
       stripeConfig,
     ),
   );
-}
-
-/** True when the viewer unlocked the wave, or owns the session and a surfer unlocked it. */
-export function isCommercialVideoUnlockedForViewer(options: {
-  videoUnlockedForUserId: string | null | undefined;
-  viewerUserId: string;
-  sessionOwnerUserId: string;
-}): boolean {
-  const unlockedFor = options.videoUnlockedForUserId?.trim() || null;
-  if (!unlockedFor) return false;
-  const viewer = options.viewerUserId.trim();
-  if (!viewer) return false;
-  if (unlockedFor === viewer) return true;
-  return options.sessionOwnerUserId.trim() === viewer;
 }
