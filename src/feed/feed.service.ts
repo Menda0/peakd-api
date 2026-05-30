@@ -24,7 +24,6 @@ import {
   computeBuyClaimMinor,
   computeCheckoutTotalMinor,
   computeSponsorMinor,
-  isCommercialVideoUnlockedForViewer,
   PLATFORM_COMMISSION_PERCENT_DEFAULT,
   resolveEffectiveCommercialSettings,
 } from '../commercial/commercial-pricing';
@@ -116,6 +115,12 @@ const LATEST_SESSIONS_DEFAULT_LIMIT = 5;
 const LATEST_SESSIONS_MAX_LIMIT = 20;
 const LATEST_WAVES_DEFAULT_LIMIT = 4;
 const LATEST_WAVES_MAX_LIMIT = 20;
+const LANDING_WAVES_DEFAULT_LIMIT = 8;
+const LANDING_WAVES_MINIMUM = 8;
+const LANDING_WAVES_MAX_LIMIT = 20;
+const LANDING_SESSIONS_DEFAULT_LIMIT = 4;
+const LANDING_SESSIONS_MAX_LIMIT = 12;
+const LANDING_HERO_SHAKA_POOL = 30;
 
 export interface LatestWaveLocationDto {
   countryCode: string;
@@ -137,6 +142,46 @@ export interface LatestWaveDto {
   sessionDate: string;
   sessionTime: string;
 }
+
+export interface PublicLandingWaveDto {
+  jobId: string;
+  sessionId: string;
+  shareToken: string | null;
+  claimStatus: 'auto' | 'claimed';
+  claimedAt: string;
+  thumbnailUrl: string | null;
+  videoUrl: string | null;
+  isCommercial: boolean;
+  surfer: SurferProfileDto | null;
+  location: LatestWaveLocationDto;
+  sessionDate: string;
+  sessionTime: string;
+}
+
+export interface PublicLandingHeroVideoDto {
+  videoUrl: string;
+  thumbnailUrl: string | null;
+}
+
+export interface PublicLandingPageDto {
+  visitorCountryCode: string | null;
+  featuredWaves: PublicLandingWaveDto[];
+  sessions: SearchSessionDto[];
+  heroBackgroundVideo: PublicLandingHeroVideoDto | null;
+}
+
+type LandingPlayableWaveRow = {
+  jobId: string;
+  claimedAt?: string;
+  claimStatus?: VideoClaimStatus;
+  claimedByUserId?: string | null;
+  userId: string;
+  processedKey?: string | null;
+  snapshotKeys?: string[];
+  createdAt?: string;
+  discoverPublishedAt?: string | null;
+  session: SurfSession;
+};
 
 export interface DiscoverFeedAuthorDto {
   userId: string;
@@ -582,11 +627,7 @@ export class FeedService {
     const claimStatus = job.claimStatus ?? 'none';
     const unlockedFor = job.videoUnlockedForUserId?.trim() || null;
     const claimedBy = job.claimedByUserId?.trim() || null;
-    const videoUnlockedByViewer = isCommercialVideoUnlockedForViewer({
-      videoUnlockedForUserId: unlockedFor,
-      viewerUserId,
-      sessionOwnerUserId: session.userId,
-    });
+    const videoUnlockedByViewer = unlockedFor === viewerUserId;
     const commissionPct = this.commissionPercent();
     const stripeFeeConfig = this.stripeFeeConfig();
     const currency = settings?.currency ?? null;
@@ -2381,15 +2422,18 @@ export class FeedService {
     return Math.min(parsed, LATEST_WAVES_MAX_LIMIT);
   }
 
-  private async enrichLatestWaveRow(row: {
-    jobId: string;
-    claimedAt: string;
-    claimStatus: 'auto' | 'claimed';
-    claimedByUserId?: string | null;
-    userId: string;
-    snapshotKeys?: string[];
-    session: SurfSession;
-  }): Promise<LatestWaveDto> {
+  private async enrichLatestWaveRow(
+    row: {
+      jobId: string;
+      claimedAt: string;
+      claimStatus: 'auto' | 'claimed';
+      claimedByUserId?: string | null;
+      userId: string;
+      snapshotKeys?: string[];
+      session: SurfSession;
+    },
+    options?: { skipShareToken?: boolean },
+  ): Promise<LatestWaveDto> {
     const session = row.session;
     const [region, spot] = await Promise.all([
       this.regionModel.findOne({ regionId: session.regionId }).lean().exec(),
@@ -2420,7 +2464,9 @@ export class FeedService {
       claimedByUserId: row.claimedByUserId ?? null,
     });
 
-    const shareToken = await this.studio.ensureShareTokenIfPublished(session);
+    const shareToken = options?.skipShareToken
+      ? null
+      : await this.studio.ensureShareTokenIfPublished(session);
 
     return {
       jobId: row.jobId,
@@ -2569,6 +2615,317 @@ export class FeedService {
       surfers,
       videoCount: row.videoCount,
       previewThumbnailUrls,
+    };
+  }
+
+  async listPublicLanding(options: {
+    countryCode?: string;
+    wavesLimit?: string;
+    sessionsLimit?: string;
+  }): Promise<PublicLandingPageDto> {
+    const visitorCountry = this.parseOptionalCountryCode(options.countryCode);
+    const wavesLimit = this.parseLandingWavesLimit(options.wavesLimit);
+    const sessionsLimit = this.parseLandingSessionsLimit(
+      options.sessionsLimit,
+    );
+
+    const [featuredWaves, latestSessions, heroBackgroundVideo] =
+      await Promise.all([
+        this.listPublicFeaturedWaves(visitorCountry, wavesLimit),
+        this.listLatestSessions('', String(sessionsLimit)),
+        this.pickPublicHeroBackgroundVideo(),
+      ]);
+
+    return {
+      visitorCountryCode: visitorCountry,
+      featuredWaves,
+      sessions: latestSessions.sessions,
+      heroBackgroundVideo,
+    };
+  }
+
+  private async pickPublicHeroBackgroundVideo(): Promise<PublicLandingHeroVideoDto | null> {
+    const pipeline: PipelineStage[] = [
+      {
+        $match: {
+          discoverPublishedAt: { $type: 'string' },
+          status: 'completed',
+          processedKey: { $exists: true, $ne: null },
+          surfSessionId: { $ne: null },
+        },
+      },
+      {
+        $lookup: {
+          from: 'surf_sessions',
+          localField: 'surfSessionId',
+          foreignField: 'sessionId',
+          as: 'session',
+        },
+      },
+      { $unwind: { path: '$session', preserveNullAndEmptyArrays: false } },
+      { $match: { 'session.isCommercial': { $ne: true } } },
+      {
+        $lookup: {
+          from: 'video_shakas',
+          localField: 'jobId',
+          foreignField: 'jobId',
+          as: 'shakas',
+        },
+      },
+      {
+        $addFields: {
+          shakaCount: { $size: '$shakas' },
+        },
+      },
+      { $sort: { shakaCount: -1, discoverPublishedAt: -1, jobId: -1 } },
+      { $limit: LANDING_HERO_SHAKA_POOL },
+    ];
+
+    const rows = (await this.videoJobModel.aggregate(pipeline).exec()) as Array<{
+      jobId: string;
+      shakaCount: number;
+      processedKey?: string | null;
+      snapshotKeys?: string[];
+    }>;
+
+    if (rows.length === 0) return null;
+
+    const withShakas = rows.filter((row) => row.shakaCount > 0);
+    const pool = withShakas.length > 0 ? withShakas : rows;
+    const pick = pool[Math.floor(Math.random() * pool.length)]!;
+    const processedKey = pick.processedKey?.trim();
+    if (!processedKey) return null;
+
+    const snapKey = pick.snapshotKeys?.find(
+      (k): k is string => typeof k === 'string' && k.trim().length > 0,
+    );
+
+    const [videoUrl, thumbnailUrl] = await Promise.all([
+      this.s3.presignedGetUrl(processedKey),
+      snapKey ? this.s3.presignedGetUrl(snapKey) : Promise.resolve(null),
+    ]);
+
+    return { videoUrl, thumbnailUrl };
+  }
+
+  private parseOptionalCountryCode(raw: string | undefined): string | null {
+    const cc = raw?.trim().toUpperCase();
+    if (!cc || !COUNTRY_CODE.test(cc)) return null;
+    return cc;
+  }
+
+  private parseLandingWavesLimit(raw: string | undefined): number {
+    if (!raw?.trim()) return LANDING_WAVES_DEFAULT_LIMIT;
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new BadRequestException('Invalid wavesLimit');
+    }
+    return Math.min(
+      Math.max(parsed, LANDING_WAVES_MINIMUM),
+      LANDING_WAVES_MAX_LIMIT,
+    );
+  }
+
+  private parseLandingSessionsLimit(raw: string | undefined): number {
+    if (!raw?.trim()) return LANDING_SESSIONS_DEFAULT_LIMIT;
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new BadRequestException('Invalid sessionsLimit');
+    }
+    return Math.min(parsed, LANDING_SESSIONS_MAX_LIMIT);
+  }
+
+  private async listPublicFeaturedWaves(
+    countryCode: string | null,
+    limit: number,
+  ): Promise<PublicLandingWaveDto[]> {
+    const targetLimit = Math.max(limit, LANDING_WAVES_MINIMUM);
+    const seen = new Set<string>();
+    const waves: PublicLandingWaveDto[] = [];
+    const fetchLimit = Math.max(targetLimit * 3, 24);
+
+    const collectFromRows = async (
+      rows: LandingPlayableWaveRow[],
+    ): Promise<void> => {
+      const candidates = rows.filter(
+        (row) =>
+          !seen.has(row.jobId) && row.session.isCommercial !== true,
+      );
+      if (candidates.length === 0) return;
+
+      for (const row of candidates) seen.add(row.jobId);
+
+      const enriched = await Promise.all(
+        candidates.map((row) => this.enrichPublicLandingWaveRow(row)),
+      );
+
+      for (let i = 0; i < candidates.length; i++) {
+        const wave = enriched[i]!;
+        if (!wave.videoUrl) continue;
+        waves.push(wave);
+        if (waves.length >= targetLimit) return;
+      }
+    };
+
+    if (countryCode) {
+      await collectFromRows(
+        await this.fetchClaimedWaveRows(countryCode, fetchLimit, true),
+      );
+    }
+    if (waves.length < targetLimit) {
+      await collectFromRows(
+        await this.fetchClaimedWaveRows(null, fetchLimit, true),
+      );
+    }
+    if (waves.length < targetLimit && countryCode) {
+      await collectFromRows(
+        await this.fetchPublishedPlayableWaveRows(
+          countryCode,
+          fetchLimit,
+          seen,
+        ),
+      );
+    }
+    if (waves.length < targetLimit) {
+      await collectFromRows(
+        await this.fetchPublishedPlayableWaveRows(null, fetchLimit, seen),
+      );
+    }
+
+    return waves.slice(0, targetLimit);
+  }
+
+  private async fetchPublishedPlayableWaveRows(
+    countryCode: string | null,
+    limit: number,
+    excludeJobIds: Set<string>,
+  ): Promise<LandingPlayableWaveRow[]> {
+    const exclude = [...excludeJobIds];
+    const pipeline: PipelineStage[] = [
+      {
+        $match: {
+          discoverPublishedAt: { $type: 'string' },
+          status: 'completed',
+          processedKey: { $exists: true, $ne: null },
+          surfSessionId: { $ne: null },
+          ...(exclude.length > 0 ? { jobId: { $nin: exclude } } : {}),
+        },
+      },
+      {
+        $lookup: {
+          from: 'surf_sessions',
+          localField: 'surfSessionId',
+          foreignField: 'sessionId',
+          as: 'session',
+        },
+      },
+      { $unwind: { path: '$session', preserveNullAndEmptyArrays: false } },
+      { $match: { 'session.isCommercial': { $ne: true } } },
+    ];
+
+    if (countryCode) {
+      const ccRegex = new RegExp(`^${this.escapeRegex(countryCode)}$`, 'i');
+      pipeline.push({
+        $match: { 'session.countryCode': ccRegex },
+      } as PipelineStage);
+    }
+
+    pipeline.push(
+      { $sort: { createdAt: -1, jobId: -1 } },
+      { $limit: limit },
+    );
+
+    return this.videoJobModel.aggregate(pipeline).exec() as Promise<
+      LandingPlayableWaveRow[]
+    >;
+  }
+
+  private async fetchClaimedWaveRows(
+    countryCode: string | null,
+    limit: number,
+    nonCommercialOnly = false,
+  ): Promise<LandingPlayableWaveRow[]> {
+    const pipeline: PipelineStage[] = [
+      {
+        $match: {
+          status: 'completed',
+          processedKey: { $exists: true, $ne: null },
+          surfSessionId: { $ne: null },
+          discoverPublishedAt: { $type: 'string' },
+          claimStatus: { $in: ['auto', 'claimed'] },
+          claimedAt: { $type: 'string' },
+        },
+      },
+      {
+        $lookup: {
+          from: 'surf_sessions',
+          localField: 'surfSessionId',
+          foreignField: 'sessionId',
+          as: 'session',
+        },
+      },
+      { $unwind: { path: '$session', preserveNullAndEmptyArrays: false } },
+    ];
+
+    if (nonCommercialOnly) {
+      pipeline.push({
+        $match: { 'session.isCommercial': { $ne: true } },
+      } as PipelineStage);
+    }
+
+    if (countryCode) {
+      const ccRegex = new RegExp(`^${this.escapeRegex(countryCode)}$`, 'i');
+      pipeline.push({
+        $match: { 'session.countryCode': ccRegex },
+      } as PipelineStage);
+    }
+
+    pipeline.push(
+      { $sort: { claimedAt: -1, _id: -1 } },
+      { $limit: limit },
+    );
+
+    return this.videoJobModel.aggregate(pipeline).exec() as Promise<
+      LandingPlayableWaveRow[]
+    >;
+  }
+
+  private async enrichPublicLandingWaveRow(
+    row: LandingPlayableWaveRow,
+  ): Promise<PublicLandingWaveDto> {
+    const claimedAt =
+      row.claimedAt?.trim() ||
+      (typeof row.discoverPublishedAt === 'string'
+        ? row.discoverPublishedAt.trim()
+        : '') ||
+      row.createdAt?.trim() ||
+      new Date().toISOString();
+    const claimStatus: 'auto' | 'claimed' =
+      row.claimStatus === 'claimed' || row.claimStatus === 'auto'
+        ? row.claimStatus
+        : 'auto';
+
+    const base = await this.enrichLatestWaveRow(
+      {
+        jobId: row.jobId,
+        claimedAt,
+        claimStatus,
+        claimedByUserId: row.claimedByUserId ?? null,
+        userId: row.userId,
+        snapshotKeys: row.snapshotKeys,
+        session: row.session,
+      },
+      { skipShareToken: true },
+    );
+    const isCommercial = row.session.isCommercial === true;
+    const videoUrl =
+      !isCommercial && row.processedKey?.trim()
+        ? await this.s3.presignedGetUrl(row.processedKey.trim())
+        : null;
+
+    return {
+      ...base,
+      videoUrl,
     };
   }
 }

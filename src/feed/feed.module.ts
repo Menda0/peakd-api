@@ -15,6 +15,7 @@ import { UserProfile, UserProfileSchema } from '../users/schemas/user-profile.sc
 import { VideoJob, VideoJobSchema } from '../video/schemas/video-job.schema';
 import { FeedController } from './feed.controller';
 import { FeedService } from './feed.service';
+import { PublicLandingController } from './public-landing.controller';
 import { VideoShaka, VideoShakaSchema } from './schemas/video-shaka.schema';
 
 @Module({
@@ -32,7 +33,7 @@ import { VideoShaka, VideoShakaSchema } from './schemas/video-shaka.schema';
       { name: VideoShaka.name, schema: VideoShakaSchema },
     ]),
   ],
-  controllers: [FeedController],
+  controllers: [FeedController, PublicLandingController],
   providers: [FeedService, Auth0JwtGuard],
 })
 export class FeedModule {}

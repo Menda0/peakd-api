@@ -192,6 +192,52 @@ describe('computeSponsorMinor', () => {
   });
 });
 
+describe('isCommercialVideoUnlockedForViewer', () => {
+  const owner = 'partner-1';
+  const buyer = 'surfer-2';
+  const other = 'surfer-3';
+
+  it('is false when nobody has unlocked', () => {
+    expect(
+      isCommercialVideoUnlockedForViewer({
+        videoUnlockedForUserId: null,
+        viewerUserId: buyer,
+        sessionOwnerUserId: owner,
+      }),
+    ).toBe(false);
+  });
+
+  it('is true for the buyer who unlocked', () => {
+    expect(
+      isCommercialVideoUnlockedForViewer({
+        videoUnlockedForUserId: buyer,
+        viewerUserId: buyer,
+        sessionOwnerUserId: owner,
+      }),
+    ).toBe(true);
+  });
+
+  it('is false for other surfers', () => {
+    expect(
+      isCommercialVideoUnlockedForViewer({
+        videoUnlockedForUserId: buyer,
+        viewerUserId: other,
+        sessionOwnerUserId: owner,
+      }),
+    ).toBe(false);
+  });
+
+  it('is true for the session owner when any surfer unlocked', () => {
+    expect(
+      isCommercialVideoUnlockedForViewer({
+        videoUnlockedForUserId: buyer,
+        viewerUserId: owner,
+        sessionOwnerUserId: owner,
+      }),
+    ).toBe(true);
+  });
+});
+
 describe('computeCheckoutTotalMinor', () => {
   it('defaults to 20% commission plus Stripe gross-up', () => {
     const r = computeCheckoutTotalMinor(1000);
@@ -250,45 +296,6 @@ describe('splitIntegerTotal', () => {
     expect(splitIntegerTotal(10, 3)).toEqual([4, 3, 3]);
     expect(splitIntegerTotal(11, 3)).toEqual([4, 4, 3]);
     expect(splitIntegerTotal(0, 5)).toEqual([0, 0, 0, 0, 0]);
-  });
-});
-
-describe('isCommercialVideoUnlockedForViewer', () => {
-  it('is true for the beneficiary surfer', () => {
-    expect(
-      isCommercialVideoUnlockedForViewer({
-        videoUnlockedForUserId: 'surfer-1',
-        viewerUserId: 'surfer-1',
-        sessionOwnerUserId: 'partner-1',
-      }),
-    ).toBe(true);
-  });
-
-  it('is true for the session owner when any surfer unlocked', () => {
-    expect(
-      isCommercialVideoUnlockedForViewer({
-        videoUnlockedForUserId: 'surfer-1',
-        viewerUserId: 'partner-1',
-        sessionOwnerUserId: 'partner-1',
-      }),
-    ).toBe(true);
-  });
-
-  it('is false for other viewers and when not unlocked', () => {
-    expect(
-      isCommercialVideoUnlockedForViewer({
-        videoUnlockedForUserId: 'surfer-1',
-        viewerUserId: 'other-1',
-        sessionOwnerUserId: 'partner-1',
-      }),
-    ).toBe(false);
-    expect(
-      isCommercialVideoUnlockedForViewer({
-        videoUnlockedForUserId: null,
-        viewerUserId: 'partner-1',
-        sessionOwnerUserId: 'partner-1',
-      }),
-    ).toBe(false);
   });
 });
 
