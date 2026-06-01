@@ -10,11 +10,12 @@ env:
   AWS_REGION: eu-central-1
   ECR_REGISTRY: 394754814010.dkr.ecr.eu-central-1.amazonaws.com
   ECR_REPOSITORY: peakd/api
+  DEPLOY_PATH: /var/apps/peakd
 
 # Deploy job secrets (per GitHub environment: production / development):
-#   SSH_HOST, SSH_USER, SSH_PRIVATE_KEY, DEPLOY_PATH
+#   SSH_HOST, SSH_USER, SSH_PRIVATE_KEY
 #   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (same as build; used for ECR login on server)
-# DEPLOY_PATH: server directory where docker compose is already configured (no file sync)
+# Compose on server: docker-compose.prod.yml (main), docker-compose.dev.yml (develop)
 
 jobs:
   build-and-push:
@@ -65,6 +66,15 @@ jobs:
     environment: ${{ github.ref_name == 'main' && 'production' || 'development' }}
 
     steps:
+      - name: Set compose file
+        id: compose
+        run: |
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            echo "file=docker-compose.prod.yml" >> "$GITHUB_OUTPUT"
+          else
+            echo "file=docker-compose.dev.yml" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Deploy on server
         uses: appleboy/ssh-action@v1.2.2
         env:
@@ -72,18 +82,19 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
           ECR_REGISTRY: ${{ env.ECR_REGISTRY }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_PATH: ${{ env.DEPLOY_PATH }}
+          COMPOSE_FILE: ${{ steps.compose.outputs.file }}
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script_stop: true
-          envs: AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_DEFAULT_REGION,ECR_REGISTRY,DEPLOY_PATH
+          envs: AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_DEFAULT_REGION,ECR_REGISTRY,DEPLOY_PATH,COMPOSE_FILE
           script: |
             set -euo pipefail
             cd "${DEPLOY_PATH}"
             aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" \
               | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
-            docker compose pull
-            docker compose down
-            docker compose up -d
+            docker compose -f "${COMPOSE_FILE}" pull
+            docker compose -f "${COMPOSE_FILE}" down
+            docker compose -f "${COMPOSE_FILE}" up -d
